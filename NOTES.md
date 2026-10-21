@@ -1,5 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+> Pixel 3 (blueline, SDM845) port, 2026-10-21: source only, not booted yet.
+> Patches 0082-0085, `tools/mkadt.py --board blueline`, `BOARD=blueline
+> shim/build.sh`. Hardware map, bring-up stages and open questions:
+> [docs/PIXEL3.md](docs/PIXEL3.md). Sweet's ADT is byte-identical and the
+> kernel falls back to sweet's values when the board nodes are absent.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

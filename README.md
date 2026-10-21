@@ -8,6 +8,11 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
+> **Pixel 3 (`blueline`, SDM845):** a source port is in this tree
+> (`tools/mkadt.py --board blueline`, `BOARD=blueline shim/build.sh`,
+> kernel patches 0082-0085, same kernel binary). It has not been booted on
+> hardware yet; see [docs/PIXEL3.md](docs/PIXEL3.md).
+
 ## What works
 
 | Area | State |
@@ -86,6 +91,8 @@ sudo umount /mnt/iosroot
 img2simg ios16-root.img ios16-root.simg
 ```
 
+On macOS nothing needs installing: `python3 tools/ipsw-extract.py IPSW OUTDIR --adt research/ipsw-x/d22ap.adt` takes the three images and the DeviceTree out of a local IPSW, `sudo tools/mkiosroot.sh --tweaks OUTDIR/os.dmg OUTDIR/systemos.dmg OUTDIR/appos.dmg ios16-root.img` builds the root with hdiutil/newfs_hfs and applies the tweaks, and `fastboot -S 512M flash userdata ios16-root.img` takes the raw image directly. The shim builds with `brew install aarch64-elf-gcc` and `tools/mkbootimg.py`.
+
 `mkiosroot.sh` copies the OS volume and both cryptexes into one case-sensitive journaled HFS+ volume. It adds the dyld cache links, the plain system keybag and the log directories the daemons expect. `sweet-root-tweaks.py` applies the bring-up changes: it skips Setup, seeds the activation state, removes the baseband daemon, disables the watchdogs that kill slow apps and the crash-looping media paths, and so on. The script's header explains each change.
 
 The device tree builder copies `/product` from the real iPhone X device tree, which MobileGestalt needs. Extract it once, without downloading the whole IPSW:
@@ -149,7 +156,7 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `shim/` | Bare-metal boot shim (C + asm) packed as an Android boot.img v2 |
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
-| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
+| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity (`--board blueline`: Pixel 3) |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
@@ -159,6 +166,7 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
 | `tools/adt.py`, `remotezip.py`, `unpack_bootv2.py`, `sparsediff.py` | Helpers |
 | `NOTES.md` | Detailed engineering log: every boot, crash and decision, plus hardware facts |
+| `docs/PIXEL3.md` | Pixel 3 (blueline) port: hardware map, staged bring-up, open questions |
 
 Not in git: partition backups, live device trees, recovery images, Apple firmware and root images, and downloaded or generated build trees. They contain device serials and calibration data, or Apple's copyrighted files.
 
