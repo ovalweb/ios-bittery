@@ -1,6 +1,7 @@
 /*
  * Just enough flattened-device-tree parsing to find what ABL put in
- * /chosen (initrd location). Big-endian, 4-byte aligned tokens.
+ * /chosen (initrd location) and to walk /memory and /reserved-memory.
+ * Big-endian, 4-byte aligned tokens.
  */
 #include "fdt.h"
 
@@ -78,6 +79,58 @@ int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out)
 		case FDT_NOP:
 			break;
 		default:	/* FDT_END or garbage */
+			return 0;
+		}
+	}
+}
+
+uint64_t fdt_cells(uintptr_t val, int ncells)
+{
+	uint64_t v = 0;
+	for (int i = 0; i < ncells; i++)
+		v = v << 32 | be32(val + 4 * i);
+	return v;
+}
+
+int fdt_walk(uintptr_t fdt, fdt_prop_cb cb, void *ctx)
+{
+	const char *names[FDT_MAX_DEPTH + 1];
+
+	if (!fdt || be32(fdt) != FDT_MAGIC)
+		return 0;
+	uintptr_t p = fdt + be32(fdt + 8);		/* off_dt_struct */
+	uintptr_t strings = fdt + be32(fdt + 12);	/* off_dt_strings */
+	int depth = 0;
+
+	names[0] = "";
+	for (;;) {
+		uint32_t tok = be32(p);
+		p += 4;
+		switch (tok) {
+		case FDT_BEGIN_NODE:
+			depth++;
+			if (depth <= FDT_MAX_DEPTH)
+				names[depth] = (const char *)p;
+			p = align4(skip_str(p));
+			break;
+		case FDT_END_NODE:
+			if (--depth < 0)
+				return 0;
+			break;
+		case FDT_PROP: {
+			uint32_t len = be32(p), nameoff = be32(p + 4);
+			uintptr_t val = p + 8;
+			if (depth >= 1 && depth <= FDT_MAX_DEPTH)
+				cb(ctx, depth, names[depth - 1], names[depth],
+				   (const char *)(strings + nameoff), val, len);
+			p = align4(val + len);
+			break;
+		}
+		case FDT_NOP:
+			break;
+		case FDT_END:
+			return 1;
+		default:
 			return 0;
 		}
 	}

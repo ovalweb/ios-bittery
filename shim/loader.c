@@ -76,6 +76,74 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+/*
+ * xnu maps [phys_base, phys_base + mem_size) cacheable in one go: a Qualcomm
+ * XPU carve-out inside it faults on the first speculative read and the phone
+ * resets without a word. Check the range against the live FDT that ABL
+ * patched: it must lie inside one /memory bank and miss every fixed
+ * /reserved-memory region (Qualcomm trees: 2 address and 2 size cells).
+ */
+struct memcheck {
+	uint64_t base, end;
+	int banks, inside, overlaps;
+};
+
+static int same(const char *a, const char *b)
+{
+	while (*a && *a == *b)
+		a++, b++;
+	return *a == *b;
+}
+
+/* "memory" matches "memory" and "memory@80000000". */
+static int node_is(const char *name, const char *base)
+{
+	while (*base && *name == *base)
+		name++, base++;
+	return !*base && (!*name || *name == '@');
+}
+
+static void memcheck_prop(void *ctx, int depth, const char *parent, const char *node,
+			  const char *prop, uintptr_t val, uint32_t len)
+{
+	struct memcheck *m = ctx;
+
+	if (!same(prop, "reg") || len % 16)
+		return;
+	for (uint32_t off = 0; off < len; off += 16) {
+		uint64_t a = fdt_cells(val + off, 2), s = fdt_cells(val + off + 8, 2);
+		if (!s)
+			continue;
+		if (depth == 2 && node_is(node, "memory")) {
+			m->banks++;
+			con_hex2("DDR MiB", "at=", (uint32_t)(a >> 20), "size=", (uint32_t)(s >> 20));
+			if (m->base >= a && m->end <= a + s)
+				m->inside = 1;
+		} else if (depth == 3 && node_is(parent, "reserved-memory") &&
+			   a < m->end && m->base < a + s) {
+			m->overlaps++;
+			con_str("RESERVED", node);
+			con_hex2(" MiB", "at=", (uint32_t)(a >> 20), "size=", (uint32_t)(s >> 20));
+		}
+	}
+}
+
+static const char *memcheck(uintptr_t dtb, uint64_t base, uint64_t size)
+{
+	struct memcheck m = { base, base + size, 0, 0, 0 };
+
+	if (!fdt_walk(dtb, memcheck_prop, &m))
+		return "live FDT unreadable";
+	if (!m.banks)
+		return "no /memory banks in live FDT";
+	if (!m.inside)
+		return "kernel RAM outside every DDR bank";
+	if (m.overlaps)
+		return "kernel RAM overlaps reserved-memory";
+	con_str("MEMCHECK", "kernel RAM is free DDR");
+	return 0;
+}
+
 const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
@@ -92,9 +160,16 @@ const char *loader_boot(uintptr_t dtb)
 		return "bad payload header";
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
-	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
+	con_hex2("PHYS MiB", "at=", (uint32_t)(p->phys_base >> 20), "size=", (uint32_t)(p->mem_size >> 20));
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
+
+	const char *mem = memcheck(dtb, p->phys_base, p->mem_size);
+	if (mem) {
+		con_str("MEMCHECK", mem);
+		if (BOARD_STRICT_MEMCHECK)
+			return mem;
+	}
 
 	/* The payload must not overlap where the kernel goes. */
 	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)

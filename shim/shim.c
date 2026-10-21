@@ -11,10 +11,10 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "display.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
+/* IMEM_RESTART_REASON and PSHOLD: board.h */
 #define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
 
 #define GICD_BASE		0x17a00000UL
 #define GICR_BASE		0x17a60000UL
@@ -374,10 +374,16 @@ void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
 
+	/* Command-mode panels show nothing drawn below until this is done. */
+	stage = "display";
+	display_prepare();
+
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-	con_str("SHIM", "sweet milestone 4: xnu loader");
+	con_str("SHIM", "milestone 4: xnu loader");
+	con_str("BOARD", BOARD_NAME);
+	display_report();
 	con_skip();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
