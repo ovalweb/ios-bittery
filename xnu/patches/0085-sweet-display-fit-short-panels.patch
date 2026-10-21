@@ -164,14 +164,33 @@
  	fLock = IOLockAlloc();
  	fClients = OSArray::withCapacity(4);
  	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
-@@ -201,8 +218,18 @@ AppleCLCD::start(IOService *provider)
+@@ -201,8 +218,37 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
 +	if (fGeom.fit) {
-+		/* Black bars: the bootloader's splash would otherwise stay beside the image. */
++		/*
++		 * Black bars around the scaled screen, or the bootloader's splash
++		 * stays there (presents only paint inside). Bars only (82 of 1080
++		 * columns on the Pixel 3) with plain stores: clearing the whole
++		 * write-combined panel tripped the DEVELOPMENT kernel's
++		 * interrupt-latency watchdog under QEMU.
++		 */
++		uint32_t right = fGeom.fit_x + fGeom.fit_w;
 +		for (uint32_t y = 0; y < fHeight; y++) {
-+			bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++			volatile uint32_t *row = (volatile uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++			if (y < fGeom.fit_y || y >= fGeom.fit_y + fGeom.fit_h) {
++				for (uint32_t x = 0; x < fWidth; x++) {
++					row[x] = 0;
++				}
++				continue;
++			}
++			for (uint32_t x = 0; x < fGeom.fit_x; x++) {
++				row[x] = 0;
++			}
++			for (uint32_t x = right; x < fWidth; x++) {
++				row[x] = 0;
++			}
 +		}
 +	}
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
@@ -183,7 +202,7 @@
  	return true;
  }
  
-@@ -359,6 +386,29 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -359,6 +405,29 @@ AppleCLCD::present(const uint8_t *rec)
  		if (dx < 0 || dy < 0) {
  			dx = dy = 0;
  		}
@@ -213,7 +232,7 @@
  		/* Logical (presented) display coordinates -> panel coordinates. */
  		dx -= fOffX;
  		dy -= fOffY;
-@@ -401,6 +451,43 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -401,6 +470,43 @@ AppleCLCD::present(const uint8_t *rec)
  	}
  }
  

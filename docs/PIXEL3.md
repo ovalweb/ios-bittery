@@ -152,10 +152,13 @@ pack it with a first-boot command line (one core, no touch or keys):
 ```sh
 python3 tools/mkadt.py shim/out/blueline.adt --board blueline --highmem
 python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/blueline.adt shim/out/payload.bin \
-    --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 sweettouch=0 sweetkeys=0 sweetusb=0'
+    --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 wdt=-1 sweettouch=0 sweetkeys=0 sweetusb=0'
 BOARD=blueline shim/build.sh ../shim/out/payload.bin
 fastboot boot shim/out/shim-boot.img
 ```
+
+`wdt=-1` also turns off the DEVELOPMENT kernel's interrupt-latency panic,
+as on the full boot line below.
 
 Expected: `MEMCHECK kernel RAM is free DDR`, then xnu's coloured stage
 bands and `SWEET EARLY` lines at the bottom of the screen, then kernel
