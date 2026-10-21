@@ -4,8 +4,11 @@
   sudo sweet-root-tweaks.py MOUNTED_ROOT
 
 MOUNTED_ROOT is the HFS+ image mounted read-write (Linux: run
-`fsck.hfsplus -fy` on the image, then `mount -t hfsplus -o loop,force`).
-Run as root (it writes root/mobile owned files). Idempotent. This is what
+`fsck.hfsplus -fy` on the image, then `mount -t hfsplus -o loop,force`;
+macOS: `hdiutil attach -owners on -imagekey diskimage-class=CRawDiskImage
+-mountpoint DIR IMG`), or let `tools/mkiosroot.sh --tweaks` run it.
+Run as root (it writes root/mobile owned files). Idempotent. The iOS
+version and build come from the image's SystemVersion.plist. This is what
 turned the plain mkiosroot.sh output into the images that reach the home
 screen (image versions v8-v14 in NOTES.md):
 
@@ -29,8 +32,8 @@ screen (image versions v8-v14 in NOTES.md):
 """
 import glob, os, plistlib, shutil, sys
 
-BUILD, VERSION = '20H392', '16.7.16'
 MOBILE = 501
+BUILD = VERSION = None      # from System/Library/CoreServices/SystemVersion.plist
 
 
 def load(path):
@@ -123,9 +126,13 @@ def audio(root):
 
 
 def main():
+    global BUILD, VERSION
     if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
         sys.exit(__doc__)
     root = sys.argv[1]
+    sv = load(os.path.join(root, 'System/Library/CoreServices/SystemVersion.plist'))
+    BUILD, VERSION = sv['ProductBuildVersion'], sv['ProductVersion']
+    print(f'iOS {VERSION} ({BUILD})')
     launchd(root)
     containers(root)
     activation(root)

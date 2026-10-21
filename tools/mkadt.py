@@ -2,7 +2,13 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the phone's live FDT. Usage:
+  mkadt.py OUT.adt [--board sweet|blueline] [--dump] [--qemu] [--highmem]
+
+--board sweet (default) is the Redmi Note 10 Pro. --board blueline is the
+Pixel 3 (SDM845, docs/PIXEL3.md): the same kernel reads the board's wiring
+from the /sweet-keys, /sweet-touch, /sweet-rpmh and /sweet-usb nodes that
+only that board emits (the kernel's built-in values are sweet's).
 """
 import hashlib, os, struct, sys
 
@@ -34,6 +40,63 @@ QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
+
+# Google Pixel 3 (blueline), Snapdragon 845, 4 GiB. Sources: Google's
+# android-msm-crosshatch-4.9 DTS (sdm845.dtsi, sdm845-b1c1-*.dtsi,
+# sdm845-b1-touch.dtsi) and mainline sdm845-google-blueline.dts.
+SDM845_TLMM = 0x03400000
+SDM845_TLMM_NORTH, SDM845_TLMM_EAST = SDM845_TLMM + 0x500000, SDM845_TLMM + 0x100000
+BLUELINE = dict(
+    name='google,blueline', soc='qcom,sdm845',
+    # Low bank: every firmware carve-out ends below the splash at 0x9f800000,
+    # Google's ramoops/debug regions end at 0xa1c11000, rmtfs sits at 0xf2700000.
+    phys_base=0xa2000000, mem_size=0x50000000,
+    # --highmem: the whole upper DDR bank of the 4 GiB phone (2 GiB, no carve-outs).
+    high_phys_base=0x100000000, high_mem_size=0x80000000,
+    # cont_splash_region@9d400000 (0x2400000), 1080x2160 a8r8g8b8; the LG SW43408
+    # is a DSC command-mode panel: the shim turns on MDP autorefresh.
+    fb=0x9d400000, fb_size=0x2400000, fb_w=1080, fb_h=2160,
+    ecid=0x424c55454c494e01,  # 'BLUELIN' + 1, synthetic
+    # cpu@0..3 Kryo 385 Silver (A55), cpu@400..700 Kryo 385 Gold (A75).
+    # 'qcom,kryo470' stays: the SweetCPU personality matches it
+    # (iokit/KernelConfigTables.cpp, patch 0018).
+    cpu_compat=['qcom,kryo385', 'qcom,kryo470'],
+    cpu_hz=lambda core: 2500000000 if core >= 4 else 1612800000,
+    nodes=lambda: [
+        # PM8998 (SID 0): PON (power, RESIN = volume down) and GPIO6 = volume up
+        node('sweet-keys', [
+            ('pon-ppid', u32(0x008)), ('volup-ppid', u32(0x0c5)), ('volup-base', u32(0xc500)),
+        ]),
+        # apps RSC DRV2 (mailbox@179e0000, TCS at +0xd00)
+        node('sweet-rpmh', [('reg', u32(0x179e0000, 0x179e0d00))]),
+        # gcc-sdm845.c: usb30_prim master/sleep/mock_utmi, cfg_noc/aggre axi,
+        # usb_phy_cfg_ahb2phy, usb3_prim_clkref
+        node('sweet-usb', [
+            ('gcc-cbcr', u32(0xf00c, 0xf010, 0xf014, 0x502c, 0x8201c, 0x6a004, 0x8c008)),
+        ]),
+        # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
+        # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
+        node('sweet-touch', [
+            ('compatible', cstr('st,fts')),
+            ('reg', u32(0x49)),
+            ('se-reg', u32(0x00888000)),
+            # APCS_CLOCK_BRANCH_ENA_VOTE_1: wrap0 m_ahb (6), s_ahb (7), s2 (12)
+            ('gcc-vote', u32((1 << 6) | (1 << 7) | (1 << 12))),
+            ('gcc-rcg', u32(0x17294)),                          # qupv3_wrap0_s2_clk_src
+            ('gcc-branches', u32(0x17004, 0x17008, 0x17290)),
+            ('sda', u32(SDM845_TLMM_EAST, 27, 1, 0, 0)),        # qup2, 2 mA, no pull
+            ('scl', u32(SDM845_TLMM_EAST, 28, 1, 0, 0)),
+            ('irq', u32(SDM845_TLMM_EAST, 125, 0, 0, 0)),       # ts_int_active
+            ('reset', u32(SDM845_TLMM_NORTH, 99, 0, 3, 3)),     # ts_reset_active: 8 mA, pull-up
+            ('bus-switch', u32(SDM845_TLMM_NORTH, 136, 0, 0, 0)),  # st,switch_gpio: 1 = AP
+            ('avdd-supply', cstr('ldoa19')),                    # pm8998_l19, 3.3 V
+            ('avdd-mv', u32(3300)),
+            ('max-x', u32(1079)), ('max-y', u32(2159)),         # st,max-coords
+            # the scaled iPhone X screen on the 5.5" 443 ppi panel (997x2160 px)
+            ('surface-mm', u32(57, 124)),
+        ]),
+    ],
+)
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
 # derives product type, device class, home-button-less UI, artwork etc. from
@@ -68,9 +131,22 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+def build(seed=None, qemu=False, highmem=False, board=None):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
+    board: None for sweet, else a board dict such as BLUELINE."""
+    if board is None:
+        phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+        fb, fb_size, fb_w, fb_h, ecid = FB, FB_SIZE, FB_W, FB_H, SWEET_ECID
+        cpu_compat = ['qcom,kryo470']
+        cpu_hz = lambda core: 2304000000 if core >= 6 else 1804800000
+        names = ['xiaomi,sweet', 'qcom,sm7150']
+    else:
+        phys_base, mem_size = ((board['high_phys_base'], board['high_mem_size']) if highmem
+                               else (board['phys_base'], board['mem_size']))
+        fb, fb_size, fb_w, fb_h = board['fb'], board['fb_size'], board['fb_w'], board['fb_h']
+        ecid, cpu_compat, cpu_hz = board['ecid'], board['cpu_compat'], board['cpu_hz']
+        # 'xiaomi,sweet' stays: SweetPlatformExpert and the CPU driver match it.
+        names = [board['name'], 'xiaomi,sweet', board['soc']]
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
@@ -101,7 +177,7 @@ def build(seed=None, qemu=False, highmem=False):
         # files), so e.g. DataMigration never records LastSystemVersion and
         # migrates on every boot. Synthetic ECID (not the phone's); chip-id
         # of the A11 that the iPhone X userland expects.
-        ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
+        ('unique-chip-id', struct.pack('<Q', ecid)),
         ('chip-id', u32(0x8015)),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
@@ -128,7 +204,7 @@ def build(seed=None, qemu=False, highmem=False):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
+            ('compatible', b''.join(cstr(c) for c in cpu_compat) + cstr('ARM,v8')),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
@@ -139,7 +215,7 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(cpu_hz(core))),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -181,10 +257,10 @@ def build(seed=None, qemu=False, highmem=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('reg', u64(fb, fb_size)),
+        ('width', u32(fb_w)),
+        ('height', u32(fb_h)),
+        ('stride', u32(fb_w * 4)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
@@ -212,23 +288,36 @@ def build(seed=None, qemu=False, highmem=False):
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
+    # Board wiring the kernel would otherwise take from its sweet defaults.
+    extra = [] if board is None or qemu else board['nodes']()
+    for n in extra:
+        k, v = ph()
+        n.props.insert(1, (k, 0, v))
+
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + b''.join(cstr(n) for n in names) + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]) + extra)
 
+
+BOARDS = {'sweet': None, 'blueline': BLUELINE}
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    board = 'sweet'
+    if '--board' in sys.argv:
+        board = sys.argv[sys.argv.index('--board') + 1]
+    if board not in BOARDS:
+        raise SystemExit(f'unknown board {board!r}; known: {", ".join(BOARDS)}')
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, board=BOARDS[board])
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
