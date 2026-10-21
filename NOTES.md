@@ -5,6 +5,19 @@
 > shim/build.sh`. Hardware map, bring-up stages and open questions:
 > [docs/PIXEL3.md](docs/PIXEL3.md). Sweet's ADT is byte-identical and the
 > kernel falls back to sweet's values when the board nodes are absent.
+>
+> 2026-10-21 Pixel 3 state (fork sashinovsky/ios-sweet, branch pixel3-blueline):
+> - CI 39646280405 and 39650047551 green; 0082-0085 applied, no errors in the
+>   port's files. Kernel of 39650047551 in xnu/out (not in git).
+> - QEMU (tools/qemu-sweet.py, observed): sweet tree boots to the root wait
+>   unchanged. Pixel 3 geometry (fb 0x9d400000 1080x2160, blueline low RAM,
+>   QEMU GIC) also reaches the root wait and AppleCLCD reports fit 997x2160
+>   at 41,0. The first kernel panicked there (interrupt-latency watchdog,
+>   rtclock_intr 15-38 ms) only with fit mode on, after clearing the whole
+>   panel; 39650047551 clears only the bars and boots with the watchdog on.
+> - iOS 16.6.1 (20G81) root built on macOS (build/ios16-root.img, 11 GiB used,
+>   fsck_hfs clean, owners checked). Not flashed. No phone results yet: next
+>   is docs/PIXEL3.md stage 0 (backup, stock DTB), then stage 1.
 
 ## Agent handoff / active work (2026-10-15, latest)
 
