@@ -1,0 +1,359 @@
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetDisplay.h
+@@ -0,0 +1,80 @@
++/*
++ * Where the display that iOS sees lands on the real panel. The framebuffer
++ * (SweetFramebuffer.cpp) and the touch digitizer (hid/SweetHID.cpp) both
++ * use this, so a touch hits what is drawn under the finger.
++ *
++ * iOS only lays itself out for real iPhone screens, so a panel that fits
++ * inside it is presented as the iPhone X screen, 1125x2436 (boot-arg
++ * sweetfb_native=1 presents the panel itself). Then either
++ *   crop: the centered panel-sized part is shown 1:1 (sweet, 1080x2400
++ *         loses 18 rows at the top and bottom), or
++ *   fit:  the whole screen is scaled down to the panel height (nearest
++ *         neighbour) and centered. Default when cropping would lose more
++ *         than 4% of the height, e.g. the Pixel 3's 1080x2160 panel would
++ *         otherwise hide the status bar and the home indicator. Boot-arg
++ *         sweetfb_fit=0/1 forces either.
++ */
++#ifndef SWEET_DISPLAY_H
++#define SWEET_DISPLAY_H
++
++#include <stdint.h>
++#include <pexpert/pexpert.h>
++
++#define SWEET_DISPLAY_LOGICAL_W 1125
++#define SWEET_DISPLAY_LOGICAL_H 2436
++
++struct sweet_display_geometry {
++	uint32_t panel_w, panel_h;      /* boot framebuffer pixels */
++	uint32_t logical_w, logical_h;  /* size reported to userland */
++	int32_t  off_x, off_y;          /* crop: logical position of panel pixel 0,0 */
++	bool     fit;
++	uint32_t fit_w, fit_h;          /* fit: the scaled screen on the panel */
++	uint32_t fit_x, fit_y;          /* fit: its panel origin */
++};
++
++static inline bool
++sweet_display_geometry(struct sweet_display_geometry *g)
++{
++	PE_Video video;
++	int native = 0, fit = -1;
++
++	g->fit = false;
++	g->fit_w = g->fit_h = g->fit_x = g->fit_y = 0;
++	g->panel_w = g->panel_h = g->logical_w = g->logical_h = 0;
++	g->off_x = g->off_y = 0;
++	PE_current_console(&video);
++	if (video.v_width == 0 || video.v_height == 0) {
++		return false;
++	}
++	g->panel_w = (uint32_t)video.v_width;
++	g->panel_h = (uint32_t)video.v_height;
++	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	PE_parse_boot_argn("sweetfb_fit", &fit, sizeof(fit));
++	g->logical_w = g->panel_w;
++	g->logical_h = g->panel_h;
++	if (!native && g->panel_w <= SWEET_DISPLAY_LOGICAL_W && g->panel_h <= SWEET_DISPLAY_LOGICAL_H) {
++		g->logical_w = SWEET_DISPLAY_LOGICAL_W;
++		g->logical_h = SWEET_DISPLAY_LOGICAL_H;
++	}
++	g->off_x = (int32_t)(g->logical_w - g->panel_w) / 2;
++	g->off_y = (int32_t)(g->logical_h - g->panel_h) / 2;
++	if (fit < 0) {
++		fit = (uint64_t)g->panel_h * 100 < (uint64_t)g->logical_h * 96;
++	}
++	g->fit = fit != 0 && (g->logical_w != g->panel_w || g->logical_h != g->panel_h);
++	if (g->fit) {
++		/* Largest logical_w:logical_h rectangle inside the panel. */
++		if ((uint64_t)g->panel_w * g->logical_h < (uint64_t)g->panel_h * g->logical_w) {
++			g->fit_w = g->panel_w;
++			g->fit_h = (uint32_t)((uint64_t)g->logical_h * g->panel_w / g->logical_w);
++		} else {
++			g->fit_h = g->panel_h;
++			g->fit_w = (uint32_t)((uint64_t)g->logical_w * g->panel_h / g->logical_h);
++		}
++		g->fit_x = (g->panel_w - g->fit_w) / 2;
++		g->fit_y = (g->panel_h - g->fit_h) / 2;
++	}
++	return true;
++}
++
++#endif
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -50,6 +50,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
++#include "SweetDisplay.h"
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -74,12 +75,11 @@ enum {
+  * The iOS userland only has status bar / layout data for real iPhone
+  * screens (UIKit: "No status bar visual provider for screen", the red
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+- * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+- * centered 1080x2400 part of it is shown on the 1080x2400 panel.
++ * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and
++ * either its centered panel-sized part is shown 1:1 (sweet: 1080x2400) or
++ * it is scaled to fit (Pixel 3: 1080x2160); see SweetDisplay.h.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
+-#define SWEET_FB_LOGICAL_W              1125
+-#define SWEET_FB_LOGICAL_H              2436
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
+ 
+ class IOMobileFramebuffer : public IOService {
+@@ -104,6 +104,8 @@ public:
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	struct sweet_display_geometry fGeom;
++	uint16_t     *fFitX, *fFitY;            /* fit: logical x/y of each scaled column/row */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -122,6 +124,8 @@ public:
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void presentFit(const SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
++	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -166,16 +170,29 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no boot framebuffer\n");
+ 		return false;
+ 	}
+-	int native = 0;
+-	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = fWidth;
+-	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+-		fLogicalW = SWEET_FB_LOGICAL_W;
+-		fLogicalH = SWEET_FB_LOGICAL_H;
++	if (!sweet_display_geometry(&fGeom) || fGeom.panel_w != fWidth || fGeom.panel_h != fHeight) {
++		IOLog("SWEET FB: display geometry mismatch\n");
++		return false;
++	}
++	fLogicalW = fGeom.logical_w;
++	fLogicalH = fGeom.logical_h;
++	fOffX = fGeom.off_x;
++	fOffY = fGeom.off_y;
++	if (fGeom.fit) {
++		/* Nearest-neighbour source of each scaled column / row (pixel centres). */
++		fFitX = (uint16_t *)IOMallocData(fGeom.fit_w * sizeof(uint16_t));
++		fFitY = (uint16_t *)IOMallocData(fGeom.fit_h * sizeof(uint16_t));
++		if (fFitX == NULL || fFitY == NULL) {
++			IOLog("SWEET FB: no memory for the fit tables\n");
++			return false;
++		}
++		for (uint32_t c = 0; c < fGeom.fit_w; c++) {
++			fFitX[c] = (uint16_t)(((uint64_t)(2 * c + 1) * fLogicalW) / (2 * fGeom.fit_w));
++		}
++		for (uint32_t r = 0; r < fGeom.fit_h; r++) {
++			fFitY[r] = (uint16_t)(((uint64_t)(2 * r + 1) * fLogicalH) / (2 * fGeom.fit_h));
++		}
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -201,8 +218,18 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	if (fGeom.fit) {
++		/* Black bars: the bootloader's splash would otherwise stay beside the image. */
++		for (uint32_t y = 0; y < fHeight; y++) {
++			bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fWidth * 4);
++		}
++	}
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	if (fGeom.fit) {
++		IOLog("SWEET FB: scaled to %ux%u at %u,%u (sweetfb_fit=0 crops instead)\n",
++		    fGeom.fit_w, fGeom.fit_h, fGeom.fit_x, fGeom.fit_y);
++	}
+ 	return true;
+ }
+ 
+@@ -359,6 +386,29 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		if (fGeom.fit) {
++			/* Clip in logical coordinates; presentFit scales to the panel. */
++			if (w > (int32_t)s->width - sx) {
++				w = (int32_t)s->width - sx;
++			}
++			if (h > (int32_t)s->height - sy) {
++				h = (int32_t)s->height - sy;
++			}
++			if (w > (int32_t)fLogicalW - dx) {
++				w = (int32_t)fLogicalW - dx;
++			}
++			if (h > (int32_t)fLogicalH - dy) {
++				h = (int32_t)fLogicalH - dy;
++			}
++			uint64_t end = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
++			    (uint64_t)(sx + w) * 4;
++			if (src != 0 && bpe == 4 && w > 0 && h > 0 && s->elementWidth == 1 &&
++			    s->elementHeight == 1 && s->memory != NULL && end <= s->memory->getLength()) {
++				presentFit(s, src, sx, sy, dx, dy, w, h);
++			}
++			s->release();
++			continue;
++		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;
+@@ -401,6 +451,43 @@ AppleCLCD::present(const uint8_t *rec)
+ 	}
+ }
+ 
++/*
++ * Fit mode: scale the layer's logical rectangle [dx, dx + w) x [dy, dy + h)
++ * (from surface position sx, sy) onto the panel by nearest neighbour.
++ * The caller checked the rectangle against the surface memory.
++ */
++void
++AppleCLCD::presentFit(const SweetSurface *s, uintptr_t src, int32_t sx, int32_t sy,
++    int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	uint32_t c0 = 0, c1 = 0;
++
++	/* fFitX is ascending: the scaled columns whose source lies in the layer. */
++	while (c0 < fGeom.fit_w && fFitX[c0] < dx) {
++		c0++;
++	}
++	c1 = c0;
++	while (c1 < fGeom.fit_w && fFitX[c1] < dx + w) {
++		c1++;
++	}
++	if (c0 == c1) {
++		return;
++	}
++	for (uint32_t r = 0; r < fGeom.fit_h; r++) {
++		int32_t ly = fFitY[r];
++		if (ly < dy || ly >= dy + h) {
++			continue;
++		}
++		const uint32_t *in = (const uint32_t *)(src + s->offset +
++		    (uint64_t)(sy + ly - dy) * s->bytesPerRow + (uint64_t)sx * 4);
++		uint32_t *out = (uint32_t *)(fPixels + (uint64_t)(fGeom.fit_y + r) * fRowBytes +
++		    (uint64_t)fGeom.fit_x * 4);
++		for (uint32_t c = c0; c < c1; c++) {
++			out[c] = in[fFitX[c] - dx];
++		}
++	}
++}
++
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+ {
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -21,6 +21,8 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <libkern/c++/OSArray.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include "../SweetDisplay.h"
+ 
+ #include "IOHIDEventService.h"
+ #include "IOHIDEventServiceUserClient.h"
+@@ -367,7 +369,7 @@ protected:
+ 	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 2; }
+ private:
+ 	IOLock *fLock;
+-	int fLogicalW, fLogicalH, fOffX, fOffY;
++	struct sweet_display_geometry fGeom;    /* panel <-> presented display */
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -432,16 +434,27 @@ SweetHIDTouch::start(IOService *provider)
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
+-	int native = 0;
+-	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	if (!sweet_display_geometry(&fGeom)) {
++		IOLog("SWEET HID: no boot framebuffer for the touch geometry\n");
++		return false;
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+-	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
++	/* Physical size of the presented display in mm (sweet: 68 x 151);
++	 * ADT /sweet-touch surface-mm = <w h> for other panels. */
++	unsigned long long mm_w = 68, mm_h = 151;
++	DTEntry node;
++	const void *mm;
++	unsigned int mm_size = 0;
++	if (SecureDTLookupEntry(NULL, "/sweet-touch", &node) == kSuccess &&
++	    SecureDTGetProperty(node, "surface-mm", &mm, &mm_size) == kSuccess && mm_size == 8) {
++		uint32_t v[2];
++		memcpy(v, mm, sizeof(v));
++		mm_w = v[0];
++		mm_h = v[1];
++	}
++	setProperty("SurfaceWidth", mm_w << 16, 32);	/* mm, 16.16 */
++	setProperty("SurfaceHeight", mm_h << 16, 32);
+ 	gSweetTouch = this;
+ 	registerService();
+ 	IOLog("SWEET HID: touch registered\n");
+@@ -458,22 +471,36 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	int pw = (int)fGeom.panel_w, ph = (int)fGeom.panel_h;
++	x = x < 0 ? 0 : (x > pw - 1 ? pw - 1 : x);
++	y = y < 0 ? 0 : (y > ph - 1 ? ph - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	/* Panel pixels -> the presented display (SweetDisplay.h, SweetFramebuffer.cpp). */
++	IOFixed nx, ny;
++	int ex = x, ey = y, ew = pw, eh = ph;   /* edge test area: what is drawn */
++	if (fGeom.fit) {
++		ew = (int)fGeom.fit_w;
++		eh = (int)fGeom.fit_h;
++		ex = x - (int)fGeom.fit_x;
++		ey = y - (int)fGeom.fit_y;
++		ex = ex < 0 ? 0 : (ex > ew - 1 ? ew - 1 : ex);
++		ey = ey < 0 ? 0 : (ey > eh - 1 ? eh - 1 : ey);
++		nx = (IOFixed)(((int64_t)ex << 16) / ew);
++		ny = (IOFixed)(((int64_t)ey << 16) / eh);
++	} else {
++		nx = (IOFixed)(((int64_t)(x + fGeom.off_x) << 16) / fGeom.logical_w);
++		ny = (IOFixed)(((int64_t)(y + fGeom.off_y) << 16) / fGeom.logical_h);
++	}
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = ex < SWEET_TOUCH_EDGE_PX || ex > ew - 1 - SWEET_TOUCH_EDGE_PX ||
++		    ey < SWEET_TOUCH_EDGE_PX || ey > eh - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);

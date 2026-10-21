@@ -1,0 +1,331 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_board.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- /dev/null
++++ b/bsd/dev/sweet_board.c
+@@ -0,0 +1,74 @@
++/*
++ * Optional per-board values from the ADT (tools/mkadt.py --board).
++ * The drivers keep the Redmi Note 10 Pro (sweet) values as defaults, so an
++ * ADT without these nodes boots exactly as before; another phone (e.g. the
++ * Pixel 3, blueline) describes its wiring in /sweet-keys, /sweet-touch,
++ * /sweet-rpmh and /sweet-usb instead of a second kernel build.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/device_tree.h>
++#include "sweet_board.h"
++
++static const void *
++sweet_board_prop(const char *node, const char *prop, unsigned int *size)
++{
++	DTEntry entry;
++	const void *value;
++
++	if (SecureDTLookupEntry(NULL, node, &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, prop, &value, size) != kSuccess) {
++		return NULL;
++	}
++	return value;
++}
++
++bool
++sweet_board_present(const char *node)
++{
++	DTEntry entry;
++
++	return SecureDTLookupEntry(NULL, node, &entry) == kSuccess;
++}
++
++bool
++sweet_board_u32(const char *node, const char *prop, uint32_t *out)
++{
++	unsigned int size = 0;
++	const void *value = sweet_board_prop(node, prop, &size);
++
++	if (value == NULL || size != sizeof(uint32_t)) {
++		return false;
++	}
++	memcpy(out, value, sizeof(uint32_t));
++	return true;
++}
++
++unsigned int
++sweet_board_u32s(const char *node, const char *prop, uint32_t *out, unsigned int max)
++{
++	unsigned int size = 0;
++	const void *value = sweet_board_prop(node, prop, &size);
++
++	if (value == NULL || size == 0 || (size % sizeof(uint32_t)) != 0 ||
++	    size / sizeof(uint32_t) > max) {
++		return 0;
++	}
++	memcpy(out, value, size);
++	return size / sizeof(uint32_t);
++}
++
++bool
++sweet_board_str(const char *node, const char *prop, char *out, size_t len)
++{
++	unsigned int size = 0;
++	const char *value = sweet_board_prop(node, prop, &size);
++
++	if (value == NULL || size == 0 || size > len || value[size - 1] != '\0') {
++		return false;
++	}
++	memcpy(out, value, size);
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- /dev/null
++++ b/bsd/dev/sweet_board.h
+@@ -0,0 +1,15 @@
++/* Optional per-board ADT values; see sweet_board.c. */
++#ifndef SWEET_BOARD_H
++#define SWEET_BOARD_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++bool sweet_board_present(const char *node);
++/* false (and *out unchanged) when the node or a 4-byte property is absent */
++bool sweet_board_u32(const char *node, const char *prop, uint32_t *out);
++/* number of u32 cells copied, 0 when absent, empty or longer than max */
++unsigned int sweet_board_u32s(const char *node, const char *prop, uint32_t *out, unsigned int max);
++/* NUL-terminated string property that fits in len bytes */
++bool sweet_board_str(const char *node, const char *prop, char *out, size_t len);
++#endif
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -1,6 +1,8 @@
+ /*
+  * Minimal polled SWEET keys. Call once after the scheduler is running.
+  * See hw-report.md: volume-up is PM6150L SID 4, NOT PM6150 SID 0.
++ * Other boards: ADT /sweet-keys pon-ppid, volup-ppid and volup-base (the
++ * PMIC GPIO peripheral, e.g. Pixel 3: PM8998 GPIO6 = PPID 0x0c5 at 0xc500).
+  * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+  * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
+  */
+@@ -12,6 +14,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include "sweet_board.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+@@ -21,12 +24,14 @@ void sweet_keys_init(void);
+ #define KEYS_OBS_PA      0x0e600000u
+ #define KEYS_CNFG_PA     0x0c40a000u
+ #define KEYS_PON_RT      0x0810u
+-#define KEYS_GPIO_RT     0xc110u
++#define KEYS_GPIO_RT     ((uint16_t)(keys_volup_base + 0x10u)) /* INT_RT_STS */
+ #define KEYS_NO_APID     0xffffu
+ 
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
+ static uint32_t keys_version, keys_last_status;
++/* sweet: PM6150 PON (SID 0) and PM6150L GPIO2 (SID 4); ADT /sweet-keys overrides */
++static uint32_t keys_pon_ppid = 0x008u, keys_volup_ppid = 0x4c1u, keys_volup_base = 0xc100u;
+ static bool keys_started;
+ static int keys_sleep_chan;
+ 
+@@ -113,8 +118,8 @@ keys_thread(void *arg, wait_result_t result)
+ 		for (int k = 0; k < 3; ++k) {
+ 			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:c110=%#x\n",
+-				    k, state[k], pon, gpio);
++				printf("SWEET KEYS: key=%d down=%d pon=%#x volup:%#x=%#x\n",
++				    k, state[k], pon, KEYS_GPIO_RT, gpio);
+ 				sweet_hid_key(k, state[k]);
+ 			}
+ 		}
+@@ -151,22 +156,31 @@ sweet_keys_init(void)
+ 		    keys_version, count);
+ 		return;
+ 	}
+-	keys_pon_apid = keys_find_apid(0x008, count);
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
++	(void)sweet_board_u32("/sweet-keys", "pon-ppid", &keys_pon_ppid);
++	(void)sweet_board_u32("/sweet-keys", "volup-ppid", &keys_volup_ppid);
++	(void)sweet_board_u32("/sweet-keys", "volup-base", &keys_volup_base);
++	if (keys_pon_ppid > 0xfffu || keys_volup_ppid > 0xfffu ||
++	    (keys_volup_base & 0xffu) || keys_volup_base > 0xff00u) {
++		printf("SWEET KEYS: bad /sweet-keys pon=%#x volup=%#x base=%#x\n",
++		    keys_pon_ppid, keys_volup_ppid, keys_volup_base);
++		return;
++	}
++	keys_pon_apid = keys_find_apid((uint16_t)keys_pon_ppid, count);
++	keys_gpio_apid = keys_find_apid((uint16_t)keys_volup_ppid, count);
+ 	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+ 	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+-	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+-	bool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio4-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
+-	    keys_version, count, keys_pon_apid, keys_gpio_apid,
++	bool mok = keys_read(keys_gpio_apid, (uint16_t)(keys_volup_base + 0x40u), &mode);
++	bool eok = keys_read(keys_gpio_apid, (uint16_t)(keys_volup_base + 0x46u), &en);
++	bool sok = keys_read(keys_gpio_apid, (uint16_t)(keys_volup_base + 0x05u), &subtype);
++	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u (ppid %#x) volup-apid=%u (ppid %#x) pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
++	    keys_version, count, keys_pon_apid, keys_pon_ppid, keys_gpio_apid, keys_volup_ppid,
+ 	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
+ 	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+ 	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+ 	    mode & 3u : (mode >> 4) & 7u;
+ 	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("SWEET KEYS: GPIO2 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++		printf("SWEET KEYS: volume-up GPIO not confirmed enabled as input; withheld, PMIC unchanged\n");
+ 		keys_gpio_apid = KEYS_NO_APID;
+ 	}
+ 	if (!pok && !gok) {
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -1,5 +1,7 @@
+ /*
+  * SWEET PM6150L L11C bring-up; see report.md for DT and source evidence.
++ * Other boards: ADT /sweet-rpmh reg = <DRV base, TCS base> of the apps RSC
++ * DRV2 (Pixel 3 / SDM845: 0x179e0000, 0x179e0d00) and an allowlisted LDO.
+  * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
+  * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
+  */
+@@ -9,13 +11,14 @@
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
++#include "sweet_board.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ 
+ /* Live downstream DT has two positional reg entries, no reg-names. */
+-#define RH_RSC_PA       0x18220000u
+-#define RH_TCS_PA       0x18220d00u
++#define RH_RSC_PA       rh_pa[0]
++#define RH_TCS_PA       rh_pa[1]
+ #define RH_TCS_SIZE     0x3000u
+ #define RH_DICT_PA      0x0c3f000cu
+ #define RH_DRV          2u
+@@ -47,6 +50,8 @@ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ #define RH_TIMEOUT_US   100000u
+ 
+ static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
++/* sweet (SM7150) apps RSC DRV2; ADT /sweet-rpmh reg overrides */
++static uint32_t rh_pa[2] = {0x18220000u, 0x18220d00u};
+ static uint32_t rh_db_size;
+ static unsigned rh_ncpt;
+ static unsigned rh_lock;
+@@ -100,6 +105,17 @@ rh_range(uint32_t off, uint32_t size)
+ static int
+ rh_map(void)
+ {
++	if (!rh_rsc && !rh_tcs) {
++		uint32_t reg[2];
++		if (sweet_board_u32s("/sweet-rpmh", "reg", reg, 2) == 2) {
++			if (reg[1] != reg[0] + 0xd00u) {
++				printf("SWEET RPMH: /sweet-rpmh reg %#x/%#x is not DRV + 0xd00\n", reg[0], reg[1]);
++				return EINVAL;
++			}
++			rh_pa[0] = reg[0];
++			rh_pa[1] = reg[1];
++		}
++	}
+ 	if (!rh_rsc) {
+ 		rh_rsc = ml_io_map(RH_RSC_PA, 0x100);
+ 	}
+@@ -234,7 +250,7 @@ rh_send(uint32_t address, unsigned mv)
+ 		for (unsigned c = 0; c < rh_ncpt; ++c) {
+ 			if ((enabled & (1u << c)) &&
+ 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
+-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
++				printf("SWEET RPMH: conflicting inherited request for this LDO in TCS%u\n", t);
+ 				return EBUSY;
+ 			}
+ 		}
+@@ -320,18 +336,23 @@ rh_send(uint32_t address, unsigned mv)
+ 		return EIO;
+ 	}
+ 	rh_poisoned = false;
+-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
++	printf("SWEET RPMH: ACTIVE vote complete (rail voltage requires hardware verification)\n");
+ 	return 0;
+ }
+ 
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+-	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/*
++	 * Board-specific helper: do not apply the LDO policy (voltage, HPM = raw
++	 * 7, enable) to arbitrary resources. Touch AVDD rails only: sweet
++	 * PM6150L L11 (PMIC5) and Pixel 3 PM8998 L19 (PMIC4; its HPM is also 7).
++	 */
++	if (!res || (strcmp(res, "ldoc11") && strcmp(res, "ldoa19")) || mv < 2950 || mv > 3400) {
++		printf("SWEET RPMH: expected ldoc11/ldoa19 and 2950..3400 mV\n");
+ 		return EINVAL;
+ 	}
++	printf("SWEET RPMH: %s %u mV\n", res, mv);
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+ 		return EBUSY;
+ 	}
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -4,7 +4,8 @@
+  * The phone's USB is a Synopsys DWC3 (USB 2.0 only, maximum-speed
+  * high-speed) at 0x0a600000 behind Qualcomm's dwc-usb3-msm wrapper, with a
+  * QUSB2 PHY at 0x088e2000; its power domain is the USB30_PRIM GDSC and its
+- * clocks come from GCC (offsets from Linux gcc-sdmmagpie.c). ABL uses this
++ * clocks come from GCC (offsets from Linux gcc-sdmmagpie.c; other SoCs set
++ * ADT /sweet-usb gcc-cbcr, e.g. SDM845 from gcc-sdm845.c). ABL uses this
+  * controller for fastboot; this probe only reports what state it is left
+  * in after `fastboot boot`. It never writes a register, and it touches the
+  * DWC3 / PHY register blocks only when the GCC status registers say their
+@@ -22,6 +23,7 @@
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/locks.h>
++#include "sweet_board.h"
+ #include <sys/kpi_mbuf.h>
+ #include <sys/kpi_socket.h>
+ #include <sys/sockio.h>
+@@ -47,7 +49,7 @@ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ #define GCC_USB30_PRIM_GDSCR    0x0f004         /* bit 31: power on */
+ #define CBCR_CLK_OFF            (1u << 31)
+ 
+-static const struct {
++static struct {
+ 	const char *name;
+ 	uint32_t    off;
+ } usb_cbcr[] = {
+@@ -85,6 +87,19 @@ sweet_usb_probe(void)
+ 	if (!enabled) {
+ 		return;
+ 	}
++	/* Same order as usb_cbcr: master, sleep, utmi, cfg-noc-axi, aggre-axi, ahb2phy, clkref */
++	uint32_t board_cbcr[sizeof(usb_cbcr) / sizeof(usb_cbcr[0])];
++	unsigned n = sweet_board_u32s("/sweet-usb", "gcc-cbcr", board_cbcr,
++	    sizeof(board_cbcr) / sizeof(board_cbcr[0]));
++	if (n == sizeof(board_cbcr) / sizeof(board_cbcr[0])) {
++		for (unsigned i = 0; i < n; i++) {
++			usb_cbcr[i].off = board_cbcr[i];
++		}
++	} else if (sweet_board_present("/sweet-usb")) {
++		printf("SWEET USB: /sweet-usb gcc-cbcr needs %u offsets; probe skipped\n",
++		    (unsigned)(sizeof(board_cbcr) / sizeof(board_cbcr[0])));
++		return;
++	}
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+ 	if (gcc == 0) {
+ 		printf("SWEET USB: GCC map failed\n");
