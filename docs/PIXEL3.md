@@ -95,6 +95,10 @@ closed drivers (AppleKeyStore, IOSurface, IOMobileFramebuffer, HID) were
 written against 16.7 and are expected to match. Everything version-specific
 in the tools is read from the IPSW.
 
+`tools/mkboot-blueline.sh shim|kernel|ios [boot-args...]` builds the boot
+image of stages 1-3 below with their command lines (extra boot-args are
+appended and win): `shim/out/blueline-<stage>.img`.
+
 ### 0. Backups and hardware dump
 
 Boot TWRP for blueline temporarily (`fastboot boot twrp-*-blueline.img`;
