@@ -70,8 +70,18 @@ def launchd(root):
     removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
     for k in removed:
         del jobs[k]
+    # keybagd: we have no data protection (no CPROTECT mount flag, no SEP).
+    # Its boot task tries to write systembag.kb.writing before the root is
+    # confirmed writable and reboots into recovery on failure.  Disable it;
+    # the system keybag is not needed without data protection.
+    disabled = 0
+    keybagd_key = '/System/Library/LaunchDaemons/com.apple.mobile.keybagd.plist'
+    if keybagd_key in jobs:
+        jobs[keybagd_key]['Disabled'] = True
+        jobs[keybagd_key]['RunAtLoad'] = False
+        disabled += 1
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed, {disabled} keybagd disabled')
 
 
 def containers(root):

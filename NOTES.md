@@ -1,5 +1,39 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+> **2026-10-22 Pixel 3 state: 🎉 iOS 16.6.1 lock screen on hardware.**
+> Boot image `shim/out/blueline-ios-cpus2.img` (cpus=2, sweetfb_noconsole=1).
+> Root image `build/ios16-root.img` / `build/ios16-root.simg` (keybagd
+> disabled, ByHost migration pref seeded). Flash: `fastboot -S 256M flash
+> userdata build/ios16-root.simg`. Boot: `fastboot boot
+> shim/out/blueline-ios-cpus2.img`. Known issues: slow (2x A55 SW render),
+> cpus=4 panics during FIPS (secondary CPU timing issue, needs investigation),
+> touch/keys/USB disabled. Next: fix cpus=4 panic, enable touch (ST FTM5).
+>
+> 2026-10-22 bring-up log:
+> - **Stage 3 flash** completed (45 chunks, `fastboot -S 256M flash userdata
+>   build/ios16-root.simg`; raw image needs img2simg first via
+>   `build/scripts/img2simg.py`; `-S 512M` fails on macOS fastboot 37 with
+>   raw files).
+> - **Boot 1** (cpus=1): keybagd FATAL — tried to write
+>   `systembag.kb.writing` on a read-only `/private/var/` mount. Fix:
+>   `sweet-root-tweaks.py` now sets `Disabled=true RunAtLoad=false` on
+>   `com.apple.mobile.keybagd` in `launchd.plist` (no data protection, no
+>   SEP, keybag not needed).
+> - **Boot 2** (cpus=1): stuck 15 min — data migration running. SpringBoard
+>   blocks in `checkInAndWaitForDataMigration`. Fix: ByHost pref
+>   `com.apple.migration.<UUID>.plist` {LastSystemVersion: 20G81} seeded for
+>   blueline UUID `9C174F6C-9D10-5ACA-8239-4133836ABA6A` (from ADT
+>   unique-chip-id=0x424c55454c494e01 chip-id=0x69686342).
+> - **Boot 3** (cpus=1, sweetfb_noconsole=0): 🎉 lock screen reached.
+>   Slow — single A55 doing SW render.
+> - **Boot 4** (cpus=4, sweetfb_noconsole=1): kernel panic during FIPS test
+>   (~1 s after launchd start). All 4 A55s (mpidr 0x0/100/200/300) came up
+>   fine; panic happened silently after `exec cc_fips_test`. Only 18 KB log,
+>   flush #2. Likely secondary CPU timer/IPI issue under load. Not yet
+>   diagnosed.
+> - **Boot 5** (cpus=2, sweetfb_noconsole=1): lock screen, faster than
+>   cpus=1, still laggy. Current working config.
+>
 > Pixel 3 (blueline, SDM845) port, 2026-10-21: source only, not booted yet.
 > Patches 0082-0085, `tools/mkadt.py --board blueline`, `BOARD=blueline
 > shim/build.sh`. Hardware map, bring-up stages and open questions:
