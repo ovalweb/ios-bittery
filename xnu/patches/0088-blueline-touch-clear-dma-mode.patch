@@ -1,11 +1,21 @@
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -780,6 +780,11 @@ touch_se_init(void)
+@@ -1,5 +1,5 @@
+ /*
+- * Requires ABL-loaded GENI I2C firmware; votes L11C through sweet_rpmh.c.
++ * Pixel 3 (blueline): ABL leaves the SE in DMA mode; clear it before FIFO init.
+  */
+ 
+ static bool
+@@ -7,7 +7,11 @@ touch_se_init(void)
+ 	uint32_t fw = touch_rd(st.se, SE_FW);
+ 	uint32_t tx = touch_rd(st.se, SE_HW_TX), rx = touch_rd(st.se, SE_HW_RX);
+ 	printf("SWEET TOUCH: se %#x fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
+-	    tb.se_pa, fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
++	    tb.se_pa, fw, (fw >> 8) & 0xffu,
++	    touch_rd(st.se, SE_STATUS), tx, rx,
  	    touch_rd(st.se, 0x908));
-+	/* GENI_DMA_MODE_EN (reg 0x64 bit 0): ABL may leave this set; clear it
-+	 * so the FIFO-mode I2C transfers below work. */
-+	if (touch_rd(st.se, 0x64) & 1u) {
++	/* GENI_DMA_MODE_EN (reg 0x64 bit 0): ABL may leave this set; FIFO needs it clear. */
++	if (touch_rd(st.se, 0x64) & 1u)
 +		touch_wr(st.se, 0x64, touch_rd(st.se, 0x64) & ~1u);
-+	}
  	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, 0x64) & 1u) ||
- 	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
