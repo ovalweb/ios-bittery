@@ -53,7 +53,7 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | Buttons | PM8998 PON (PPID `0x008`): power, RESIN = volume down; volume up = PM8998 GPIO6 (PPID `0x0c5`, `0xc500`) | PM6150L GPIO2 |
 | SPMI | `0xc440000` (core), `0xe600000` (obsrvr), `0xc40a000` (cnfg) | same |
 | USB | DWC3 `0xa600000`, QUSB2 `0x88e2000`, GDSC `0xf004`; CBCRs master `0xf00c`, sleep `0xf010`, utmi `0xf014`, clkref `0x8c008` | `0xf010`/`0xf014`/`0xf018`/`0x8c010` |
-| Boot image | header v2, base 0, 4 KiB pages, DTB in boot.img | same |
+| Boot image | header v2, base 0, 4 KiB pages, DTB in boot.img; ABL also wants an LZ4-framed kernel (4 MiB blocks), `text_offset` `0x80000` and an AVB hash footer (unsigned) padded to 64 MiB, or `fastboot boot` fails with "Unsupported" / "Invalid Parameter" | raw Image, no footer |
 
 ## What the port changes
 

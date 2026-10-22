@@ -69,7 +69,7 @@ def main():
                       b'ANDROID!',
                       len(kernel), a.base + a.kernel_offset,
                       len(ramdisk), a.base + a.ramdisk_offset,
-                      0, a.base + a.second_offset,
+                      0, 0,                               # no second stage: size and address 0
                       a.base + a.tags_offset, a.pagesize, a.header_version,
                       os_version(a.os_version, a.os_patch_level),
                       a.board.encode(), cmd[:512], sha.digest(), cmd[512:])

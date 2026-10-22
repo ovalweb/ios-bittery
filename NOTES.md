@@ -25,7 +25,12 @@
 >   backup/ (not in git). Stock boot_a: header v2, base 0, DTB section.
 >   Live /memory = 0x80000000+0xfe0a0000: highmem shrunk to 0x7e000000.
 >   Touch, panel (sw43408 cmd), IMEM, RSC, keys, CPUs, GIC, UFS match.
->   Next: stage 1 (tools/mkboot-blueline.sh shim).
+> - 2026-10-22 stage 1 (observed): ABL refused the first images ("Error
+>   verifying the received boot.img: Unsupported", then "Invalid Parameter").
+>   Needed, as in TWRP/stock boot.img: LZ4 frame kernel (BD 0x70), Image
+>   text_offset 0x80000, unsigned AVB hash footer at 64 MiB. Then `fastboot
+>   boot` OKAY and the shim draws its red diagnostic screen: MDP PINGPONG
+>   autorefresh makes the command-mode panel show framebuffer writes.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

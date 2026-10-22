@@ -50,7 +50,18 @@ else
 fi
 MKBOOTIMG=mkbootimg
 command -v mkbootimg >/dev/null 2>&1 || MKBOOTIMG="python3 ../tools/mkbootimg.py"
-$MKBOOTIMG --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
+# Pixel ABL only boots an LZ4-framed kernel (Image.lz4, as in its stock and
+# TWRP boot images); Xiaomi's ABL takes the raw Image.
+KIMG=out/Image
+if [ "$BOARD" = blueline ]; then
+	command -v lz4 >/dev/null || { echo "error: blueline needs lz4 (brew/apt install lz4)" >&2; exit 1; }
+	# lz4 shrinks the block size to fit small inputs: restore the stock
+	# kernels' 4 MiB (BD 0x70) and its header checksum.
+	lz4 -12 -B7 -q < out/Image > out/Image.small.lz4
+	python3 ../tools/lz4-bd.py out/Image.small.lz4 out/Image.lz4 --bsid 7
+	KIMG=out/Image.lz4
+fi
+$MKBOOTIMG --header_version 2 --kernel "$KIMG" --ramdisk out/ramdisk.bin \
 	--dtb "$DTB" --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 	--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
 	--os_version 17.0.0 --os_patch_level 2035-06 \

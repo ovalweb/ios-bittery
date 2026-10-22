@@ -47,4 +47,10 @@ else
 	echo "boot-args: $args"
 fi
 cp shim/out/shim-boot.img "shim/out/blueline-$stage.img"
+# The Pixel 3's ABL refuses `fastboot boot` without an AVB footer, even unlocked.
+# Same property descriptors as the TWRP image that boots on it.
+python3 tools/avbfooter.py add "shim/out/blueline-$stage.img" --partition-size 67108864 \
+	--prop com.android.build.boot.fingerprint:ios-sweet/blueline/blueline:99.87.36/SHIM/1:user/test-keys \
+	--prop com.android.build.boot.os_version:99.87.36 \
+	--prop com.android.build.boot.security_patch:2099-12-31
 echo "-> shim/out/blueline-$stage.img (fastboot boot shim/out/blueline-$stage.img)"
