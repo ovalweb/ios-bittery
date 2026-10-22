@@ -31,6 +31,9 @@
 >   text_offset 0x80000, unsigned AVB hash footer at 64 MiB. Then `fastboot
 >   boot` OKAY and the shim draws its red diagnostic screen: MDP PINGPONG
 >   autorefresh makes the command-mode panel show framebuffer writes.
+> - 2026-10-22 stage 2 (observed on screen, no persistent log: read-only UFS):
+>   kernel of CI 39650047551 boots past the early stages, prints kernel text
+>   and reaches the root mount, which fails on Android's userdata (expected).
 
 ## Agent handoff / active work (2026-10-15, latest)
 
