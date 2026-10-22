@@ -35,8 +35,8 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | | Pixel 3 (SDM845) | sweet (SM7150) |
 | --- | --- | --- |
 | CPU | 4x A55 (cpu@0-300) + 4x A75 (cpu@400-700), ARMv8.2, no PAC | 6x A55 + 2x A76 |
-| RAM | 4 GiB: `0x80000000`-`0x17fffffff` | 6/8 GiB |
-| Kernel RAM | `--highmem`: `0x100000000` + 2 GiB (upper bank). Low: `0xa2000000` + 1.25 GiB | `0x100000000` + 3.95 GiB |
+| RAM | 4 GiB; live `/memory` = `0x80000000` + `0xfe0a0000` (DDR for the OS ends at `0x17e0a0000`) | 6/8 GiB |
+| Kernel RAM | `--highmem`: `0x100000000` + `0x7e000000` (2016 MiB). Low: `0xa2000000` + 1.25 GiB. Both checked against the live FDT | `0x100000000` + 3.95 GiB |
 | Carve-outs | hyp `0x85700000` ... spss ends `0x99c00000`, splash `0x9d400000`-`0x9f800000`, ramoops/debug `0xa1800000`-`0xa1c11000`, rmtfs `0xf2700000` | all in the low bank |
 | GIC | GICD `0x17a00000`, GICR `0x17a60000`, vtimer INTID 19 | same |
 | PSCI / PSHOLD | SMC, `0xc264000` | same |
@@ -222,10 +222,11 @@ Ordered by how likely they are to stop the boot.
    picture freezes), the next step is a kick per present: write `CTL_START`
    (`0xae02000` + n*0x200 + `0x1c`) after each copy in
    `SweetFramebuffer.cpp`.
-2. **Upper DDR bank.** The 2 GiB at `0x100000000` assume the usual SDM845
-   layout for 4 GiB and no carve-out there; the shim's memory check
-   confirms it from the live FDT before xnu starts. iOS then has 2 GiB
-   instead of the iPhone X's 3 GiB (the iPhone 8 runs iOS 16 with 2 GiB).
+2. **Upper DDR bank.** Settled from the live FDT (2026-10-22): ABL gives
+   the OS DDR up to `0x17e0a0000`, so `--highmem` uses 2016 MiB from
+   `0x100000000`, inside the bank and clear of every fixed reservation;
+   the shim checks it again on every boot. iOS has about 2 GiB instead of
+   the iPhone X's 3 GiB (the iPhone 8 runs iOS 16 with 2 GiB).
 3. **ABL payload placement.** On sweet ABL put the ramdisk just below
    `hyp_mem` (`0x85700000`); the same reserved layout should give the same
    result here.

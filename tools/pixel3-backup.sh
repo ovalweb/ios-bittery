@@ -9,6 +9,9 @@
 #   <partition>.img   every partition except userdata (both A/B slots,
 #                     persist and the modem file systems with the IMEI and
 #                     calibration that exist nowhere else)
+#   sdX-gpt-head.bin, sdX-gpt-tail.bin   first and last 64 KiB of each UFS LUN
+#                     (the GPT; by-name also lists the whole LUNs sda..sdf,
+#                     which are not copied: sda contains userdata)
 #   live.dtb iomem.txt getprop.txt partitions.txt   for the port (docs/PIXEL3.md)
 #   SHA256SUMS        checked against sha256sum on the phone
 # --essential       skip system_*, system_ext_*, vendor_*, product_* (several GB;
@@ -65,6 +68,7 @@ parts=$(sh_root "ls $dir" | tr -d '\r')
 skip() {
 	case $1 in
 	userdata) [ $userdata = 0 ] ;;
+	sd[a-z]) true ;;        # whole LUN: only its GPT is saved, below
 	system_*|system_ext_*|vendor_*|product_*) [ $essential = 1 ] ;;
 	*) false ;;
 	esac
@@ -99,6 +103,16 @@ for p in $parts; do
 	[ "$want" = "$have" ] || { echo "checksum mismatch"; exit 1; }
 	echo "$have  $p.img" >> "$out/SHA256SUMS"
 	echo ok
+done
+
+# Partition tables: primary GPT at the start, backup GPT at the end of each LUN.
+for p in $parts; do
+	case $p in sd[a-z]) ;; *) continue ;; esac
+	size=$(awk -v p="$p" '$1 == p { print $2 }' "$out/partitions.txt")
+	sh_root "dd if=$dir/$p bs=65536 count=1 2>/dev/null" > "$out/$p-gpt-head.bin"
+	sh_root "dd if=$dir/$p bs=65536 skip=$((size / 65536 - 1)) count=1 2>/dev/null" > "$out/$p-gpt-tail.bin"
+	for f in head tail; do echo "$(sha256 "$out/$p-gpt-$f.bin")  $p-gpt-$f.bin" >> "$out/SHA256SUMS"; done
+	echo "$p: GPT saved ($((size >> 20)) MiB LUN)"
 done
 
 if [ $sdcard = 1 ]; then

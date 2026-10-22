@@ -16,8 +16,16 @@
 >   rtclock_intr 15-38 ms) only with fit mode on, after clearing the whole
 >   panel; 39650047551 clears only the bars and boots with the watchdog on.
 > - iOS 16.6.1 (20G81) root built on macOS (build/ios16-root.img, 11 GiB used,
->   fsck_hfs clean, owners checked). Not flashed. No phone results yet: next
->   is docs/PIXEL3.md stage 0 (backup, stock DTB), then stage 1.
+>   fsck_hfs clean, owners checked). Not flashed.
+> - 2026-10-22 stage 0 done (observed): phone runs a custom AOSP 14 user build
+>   (aosp_blueline UD2A.240505.001.W1), bootloader b1c1-0.4-7617406, unlocked,
+>   slot a. /sdcard (29 MB) + app list pulled; full partition backup from
+>   TWRP 3.7.1_12 (screen stays on the logo, adb root works): 69 partitions +
+>   12 GPT head/tail files, all 81 SHA-256 match on phone and host. In
+>   backup/ (not in git). Stock boot_a: header v2, base 0, DTB section.
+>   Live /memory = 0x80000000+0xfe0a0000: highmem shrunk to 0x7e000000.
+>   Touch, panel (sw43408 cmd), IMEM, RSC, keys, CPUs, GIC, UFS match.
+>   Next: stage 1 (tools/mkboot-blueline.sh shim).
 
 ## Agent handoff / active work (2026-10-15, latest)
 

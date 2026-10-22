@@ -51,8 +51,10 @@ BLUELINE = dict(
     # Low bank: every firmware carve-out ends below the splash at 0x9f800000,
     # Google's ramoops/debug regions end at 0xa1c11000, rmtfs sits at 0xf2700000.
     phys_base=0xa2000000, mem_size=0x50000000,
-    # --highmem: the whole upper DDR bank of the 4 GiB phone (2 GiB, no carve-outs).
-    high_phys_base=0x100000000, high_mem_size=0x80000000,
+    # --highmem: the upper DDR bank below the firmware's top-of-DDR area. The
+    # live FDT (TWRP, 2026-10-22) has /memory = <0x80000000 0xfe0a0000>, so
+    # DDR handed to the OS ends at 0x17e0a0000; 0x7e000000 stays 2 MiB aligned.
+    high_phys_base=0x100000000, high_mem_size=0x7e000000,
     # cont_splash_region@9d400000 (0x2400000), 1080x2160 a8r8g8b8; the LG SW43408
     # is a DSC command-mode panel: the shim turns on MDP autorefresh.
     fb=0x9d400000, fb_size=0x2400000, fb_w=1080, fb_h=2160,
