@@ -8,3 +8,6 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+tools/flamebridge/FlameBridge.app/Contents/MacOS/
+tools/flamebridge/FlameBridge.app/Contents/_CodeSignature/
+tools/__pycache__/
