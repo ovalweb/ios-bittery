@@ -1,0 +1,135 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -693,6 +693,15 @@ touch_bb_byte_in(uint8_t *v, bool ack)
+ 	return touch_bb_bit_out(!ack);
+ }
+ 
++/* The pins leave the SE: GPIO function, pull-ups as a backstop. */
++static void
++touch_bb_enable(void)
++{
++	tb.sda.mux = tb.scl.mux = 0;
++	tb.sda.pull = tb.scl.pull = 3;
++	st.bb = true;
++}
++
+ /* touch_msg_run on the bit-banged bus. */
+ static int
+ touch_bb_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+@@ -974,19 +983,75 @@ touch_smmu_match(unsigned nsmr, uint32_t sid)
+ 	return -1;
+ }
+ 
++/* sweettouchsmmu=2: one write per step, each announced and given time to reach the disk. */
++static void
++touch_gpi_smmu_step(const char *what)
++{
++	printf("SWEET TOUCH: smmu step: %s\n", what);
++	touch_wait(1200);
++}
++
++static void
++touch_gpi_smmu_linux(unsigned nsmr, unsigned free_smr, uint32_t gr1)
++{
++	uint32_t idr1 = touch_rd(st.smmu, SMMU_IDR1);
++	uint32_t pg = (idr1 & (1u << 31)) ? 0x10000u : 0x1000u;
++	uint32_t cb_base = (1u << (((idr1 >> 28) & 7u) + 1u)) * pg;
++	unsigned ncb = idr1 & 0xffu, last = nsmr - 1u, cb = ncb - 1u;
++	printf("SWEET TOUCH: smmu idr1=%#x %u context banks at +%#x, page %#x\n", idr1, ncb, cb_base, pg);
++	if (!ncb || cb_base + ncb * pg > 0x80000u || (touch_rd(st.smmu, SMMU_SMR(last)) & SMMU_SMR_VALID)) {
++		printf("SWEET TOUCH: smmu layout unexpected; stopping\n");
++		return;
++	}
++	for (unsigned i = 0; i < nsmr; ++i) {
++		uint32_t s2cr = touch_rd(st.smmu, SMMU_S2CR(i));
++		if ((touch_rd(st.smmu, SMMU_SMR(i)) & SMMU_SMR_VALID) && !((s2cr >> 16) & 3u) &&
++		    (s2cr & 0xffu) == cb) {
++			printf("SWEET TOUCH: smmu last context bank %u in use by smr%u; stopping\n", cb, i);
++			return;
++		}
++	}
++	touch_gpi_smmu_step("probe S2CR bypass on the last SMR (Linux qcom_smmu_cfg_probe)");
++	touch_wr(st.smmu, SMMU_S2CR(last), (1u << 16) | 0xffu);
++	uint32_t probe = touch_rd(st.smmu, SMMU_S2CR(last));
++	bool bypass = ((probe >> 16) & 3u) == 1u;
++	printf("SWEET TOUCH: smmu s2cr%u reads %#x: bypass %s\n", last, probe,
++	    bypass ? "kept" : "refused (emulate with a context bank)");
++	uint32_t s2cr = (1u << 16) | 0xffu;
++	if (!bypass) {
++		touch_gpi_smmu_step("context bank: SCTLR 0 (MMU off)");
++		touch_wr(st.smmu, cb_base + cb * pg, 0);
++		touch_gpi_smmu_step("context bank: CBAR S1 translation, S2 bypass");
++		touch_wr(st.smmu, gr1 + SMMU_CBAR(cb), 1u << 16);
++		printf("SWEET TOUCH: smmu cb%u sctlr=%#x cbar=%#x\n", cb,
++		    touch_rd(st.smmu, cb_base + cb * pg), touch_rd(st.smmu, gr1 + SMMU_CBAR(cb)));
++		s2cr = cb;
++	}
++	touch_gpi_smmu_step("S2CR of the free SMR");
++	touch_wr(st.smmu, SMMU_S2CR(free_smr), s2cr);
++	touch_gpi_smmu_step("SMR valid for the GPI stream");
++	touch_wr(st.smmu, SMMU_SMR(free_smr), SMMU_SMR_VALID | tb.gpi_sid);
++	printf("SWEET TOUCH: smmu smr%u now %#x s2cr %#x\n", free_smr,
++	    touch_rd(st.smmu, SMMU_SMR(free_smr)), touch_rd(st.smmu, SMMU_S2CR(free_smr)));
++}
++
+ /*
+  * SDM845's hypervisor faults DMA from apps SMMU streams that have no stream
+  * mapping; Linux arm-smmu-qcom.c keeps the ones ABL left. ABL never used the
+  * GPI master, so give its stream a free SMR whose S2CR copies the one of a
+  * master ABL left working (UFS). Only with sweettouchsmmu=1: on the Pixel 3
+  * the hypervisor resets the phone on these writes (boot 2026-10-23).
++ * sweettouchsmmu=2 follows Linux arm-smmu-qcom instead, one logged step at a
++ * time: probe a bypass S2CR on the last SMR; if the hypervisor turns it into
++ * a fault, emulate bypass with the last context bank (SCTLR 0, CBAR "S1
++ * translation, S2 bypass") and route the stream there.
+  */
+ static void
+ touch_gpi_smmu(void)
+ {
+ 	int enable = 0;
+ 	(void)PE_parse_boot_argn("sweettouchsmmu", &enable, sizeof(enable));
+-	st.smmu = ml_io_map(tb.smmu_pa, 0x20000);
++	st.smmu = ml_io_map(tb.smmu_pa, 0x80000);   /* MMU-500: global and context banks */
+ 	if (!st.smmu) {
+ 		printf("SWEET TOUCH: smmu %#x mapping failed\n", tb.smmu_pa);
+ 		return;
+@@ -1018,6 +1083,10 @@ touch_gpi_smmu(void)
+ 		return;
+ 	}
+ 	touch_wait(1500);       /* the lines above reach the disk if the writes below are fatal */
++	if (enable == 2) {
++		touch_gpi_smmu_linux(nsmr, (unsigned)free_smr, gr1);
++		return;
++	}
+ 	uint32_t s2cr = touch_rd(st.smmu, SMMU_S2CR((unsigned)rm));
+ 	touch_wr(st.smmu, SMMU_S2CR((unsigned)free_smr), s2cr);
+ 	touch_wr(st.smmu, SMMU_SMR((unsigned)free_smr), SMMU_SMR_VALID | tb.gpi_sid);
+@@ -1466,12 +1535,9 @@ touch_se_init(void)
+ 		if (gpi && tb.gpi_pa && ((fw >> 8) & 0xffu) == 3u) {
+ 			return touch_gpi_init();
+ 		}
+-		/* The pins leave the SE: GPIO function, pull-ups as a backstop. */
+ 		printf("SWEET TOUCH: SE has no FIFO: bit-banged I2C on gpio%u/%u (sweettouchgpi=1: GPI DMA)\n",
+ 		    tb.sda.pin, tb.scl.pin);
+-		tb.sda.mux = tb.scl.mux = 0;
+-		tb.sda.pull = tb.scl.pull = 3;
+-		st.bb = true;
++		touch_bb_enable();
+ 		return true;
+ 	}
+ 	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, SE_FIFO_OFF) & 1u) ||
+@@ -1541,6 +1607,14 @@ touch_stfts_start(void)
+ 	printf("SWEET TOUCH: ftm5 ready=%d chip-id err=%d %02x %02x fw %02x%02x irq=%#x\n",
+ 	    ready, ide, id[0], id[1], id[5], id[4], touch_gpio_io(&tb.irq));
+ 	if (st.dead || ide || id[0] != 0x36 || id[1] != 0x39) {
++		if (st.gpi && !st.bb) {
++			printf("SWEET TOUCH: no FTM5 over GPI DMA; retrying bit-banged\n");
++			touch_bb_enable();
++			touch_gpio(&tb.sda, false, false);
++			touch_gpio(&tb.scl, false, false);
++			st.dead = false;
++			return touch_stfts_start();
++		}
+ 		printf("SWEET TOUCH: no FTM5 at %#x (want chip id 36 39); stopping\n", tb.addr);
+ 		return false;
+ 	}
