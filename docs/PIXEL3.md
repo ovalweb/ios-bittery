@@ -211,6 +211,9 @@ black bars of 41 px left and right. Read the log with TWRP:
 
 ### 4. Buttons, touch, more cores
 
+Working set (2026-10-23, touch and keys on): `tools/mkboot-blueline.sh ios cpus=2
+sweetfb_noconsole=1 sweettouch=1 sweetkeys=1 ufslogsecs=1`.
+
 Drop `sweetkeys=0` (look for `SWEET KEYS: ... pon-apid=... volup-apid=...`),
 then `sweettouch=0` (look for `SWEET TOUCH: board st,fts`, `ftm5 ready=0
 chip-id err=0 36 39`, `selected ST FTM5`; the GPI lines come first:

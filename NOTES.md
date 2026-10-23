@@ -9,9 +9,14 @@
 > cpus=4 panics during FIPS (secondary CPU timing issue, needs investigation),
 > touch/keys/USB disabled. Next: fix cpus=4 panic, enable touch (ST FTM5).
 >
-> 2026-10-23: touch SE2 has no FIFO (GENI_IF_DISABLE_RO bit 0), so 0086 adds a
-> polled GPI DMA I2C path (gpi_dma0 0x800000, GPII from mask 0xfa, SE id 2).
-> Untested on hardware; boot with `sweettouch=1` and look for `SWEET TOUCH: gpi`.
+> **2026-10-23: 🎉 TOUCH WORKS on the Pixel 3** (boot image
+> `shim/out/blueline-ios-touch3.img`: kernel 0088, `cpus=2 sweetfb_noconsole=1
+> sweettouch=1 sweetkeys=1 ufslogsecs=1`). Touch SE2 has no FIFO; GPI DMA
+> (0086) needs an SMMU stream mapping for 0x16 and the hypervisor resets the
+> phone when the kernel writes one (0087, logs `build/logs/blueline-touch-boot1/2.txt`),
+> so 0088 bit-bangs I2C on gpio27/28. Known: Settings > General > About
+> crashes (same as sweet: force-unwrap of `URL.volumeTotalCapacity`, nil on
+> the HFS+ root); Wi-Fi and GPU not started. Next: About crash, cpus=4.
 >
 > 2026-10-22 bring-up log:
 > - **Stage 3 flash** completed (45 chunks, `fastboot -S 256M flash userdata
