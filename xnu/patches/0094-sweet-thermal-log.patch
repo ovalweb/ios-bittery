@@ -1,0 +1,206 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/sweet_thermal.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+--- /dev/null
++++ b/bsd/dev/sweet_thermal.c
+@@ -0,0 +1,175 @@
++/*
++ * SWEET thermal log. The Pixel 3 resets after 20-35 minutes of iOS without
++ * a panic; nothing in this kernel manages temperature or CPU frequency.
++ * Every 30 s print the hottest sensor of each TSENS controller, each CPU
++ * frequency domain's requested performance level and frequency, and the
++ * APSS watchdog state, from ADT /sweet-thermal:
++ *   tsens     <TM base, sensor count> per controller
++ *   cpufreq   one base per frequency domain (cpufreq-hw, SDM845 layout)
++ *   watchdog  APSS watchdog base
++ * Read-only. Linux: drivers/thermal/qcom/tsens-v2.c,
++ * drivers/cpufreq/qcom-cpufreq-hw.c, drivers/watchdog/qcom-wdt.c.
++ * Boot-arg sweetthermal=0 turns it off; sweetthermal=N sets the period (s).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include "sweet_board.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++void sweet_thermal_start(void);
++
++#define THERM_TSENS_MAX     4u
++#define THERM_DOMAINS_MAX   4u
++#define TSENS_STATUS(n)     (0xa0u + 4u * (n))  /* bits 11:0 deciC (signed), bit 21 valid */
++#define CPUFREQ_LUT(i)      (0x110u + 32u * (i)) /* 31:30 source, 7:0 L value */
++#define CPUFREQ_PERF_STATE  0x920u
++#define CPUFREQ_LUT_MAX     40u
++#define WDT_EN              0x08u               /* qcom-wdt kpss layout, 32768 Hz ticks */
++#define WDT_BARK_TIME       0x10u
++#define WDT_BITE_TIME       0x14u
++
++static struct {
++	vm_offset_t tsens[THERM_TSENS_MAX];
++	unsigned tsens_count[THERM_TSENS_MAX], ntsens;
++	vm_offset_t cpufreq[THERM_DOMAINS_MAX];
++	unsigned ndomains;
++	vm_offset_t wdt;
++	unsigned period;
++} th;
++static int therm_sleep_chan;
++
++static uint32_t
++therm_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++/* Hottest valid sensor in deciC, or INT32_MIN when none is valid. */
++static int
++therm_tsens_max(unsigned c, unsigned *sensor)
++{
++	int best = INT32_MIN;
++	for (unsigned n = 0; n < th.tsens_count[c]; ++n) {
++		uint32_t v = therm_rd(th.tsens[c], TSENS_STATUS(n));
++		if (!(v & (1u << 21))) {
++			continue;
++		}
++		int t = (int)(v << 20) >> 20;   /* sign-extend 12 bits */
++		if (t > best) {
++			best = t;
++			*sensor = n;
++		}
++	}
++	return best;
++}
++
++/* Frequency of the requested level in MHz: L * 19.2 MHz, or 300 MHz for source 0. */
++static unsigned
++therm_domain_mhz(unsigned d, unsigned *level)
++{
++	*level = therm_rd(th.cpufreq[d], CPUFREQ_PERF_STATE);
++	if (*level >= CPUFREQ_LUT_MAX) {
++		return 0;
++	}
++	uint32_t lut = therm_rd(th.cpufreq[d], CPUFREQ_LUT(*level));
++	return (lut >> 30) ? (lut & 0xffu) * 192u / 10u : 300u;
++}
++
++static void
++therm_report(void)
++{
++	char line[256];
++	int len = snprintf(line, sizeof(line), "SWEET THERMAL:");
++	for (unsigned c = 0; c < th.ntsens && len < (int)sizeof(line); ++c) {
++		unsigned s = 0;
++		int t = therm_tsens_max(c, &s);
++		if (t == INT32_MIN) {
++			len += snprintf(line + len, sizeof(line) - len, " tsens%u -", c);
++		} else {
++			len += snprintf(line + len, sizeof(line) - len, " tsens%u %s%d.%d C (s%u)", c,
++			    t < 0 ? "-" : "", (t < 0 ? -t : t) / 10, (t < 0 ? -t : t) % 10, s);
++		}
++	}
++	for (unsigned d = 0; d < th.ndomains && len < (int)sizeof(line); ++d) {
++		unsigned level = 0, mhz = therm_domain_mhz(d, &level);
++		len += snprintf(line + len, sizeof(line) - len, " cpu-domain%u L%u %u MHz", d, level, mhz);
++	}
++	printf("%s\n", line);
++}
++
++__attribute__((noreturn)) static void
++therm_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	if (th.wdt) {
++		uint32_t en = therm_rd(th.wdt, WDT_EN), bark = therm_rd(th.wdt, WDT_BARK_TIME);
++		uint32_t bite = therm_rd(th.wdt, WDT_BITE_TIME);
++		printf("SWEET THERMAL: apss watchdog en=%#x bark=%u bite=%u ticks (%u/%u s)\n",
++		    en, bark, bite, bark / 32768u, bite / 32768u);
++	}
++	for (unsigned d = 0; d < th.ndomains; ++d) {
++		/* the frequency table once: level -> MHz */
++		char line[256];
++		int len = snprintf(line, sizeof(line), "SWEET THERMAL: cpu-domain%u levels:", d);
++		for (unsigned i = 0; i < CPUFREQ_LUT_MAX && len < (int)sizeof(line); ++i) {
++			uint32_t lut = therm_rd(th.cpufreq[d], CPUFREQ_LUT(i));
++			unsigned mhz = (lut >> 30) ? (lut & 0xffu) * 192u / 10u : 300u;
++			len += snprintf(line + len, sizeof(line) - len, " %u", mhz);
++			if (i > 0 && (lut & 0xffu) == (therm_rd(th.cpufreq[d], CPUFREQ_LUT(i - 1)) & 0xffu)) {
++				break;  /* the table repeats its last entry */
++			}
++		}
++		printf("%s\n", line);
++	}
++	for (;;) {
++		therm_report();
++		uint64_t deadline;
++		clock_interval_to_deadline(th.period, NSEC_PER_SEC, &deadline);
++		(void)assert_wait_deadline(&therm_sleep_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++sweet_thermal_start(void)
++{
++	int period = 30;
++	uint32_t cells[2 * THERM_TSENS_MAX];
++	(void)PE_parse_boot_argn("sweetthermal", &period, sizeof(period));
++	if (period <= 0 || !sweet_board_present("/sweet-thermal")) {
++		return;
++	}
++	th.period = (unsigned)period;
++	unsigned n = sweet_board_u32s("/sweet-thermal", "tsens", cells, 2 * THERM_TSENS_MAX);
++	for (unsigned i = 0; i + 1 < n; i += 2) {
++		if (cells[i + 1] == 0 || cells[i + 1] > 16 || !(th.tsens[th.ntsens] = ml_io_map(cells[i], 0x1000))) {
++			continue;
++		}
++		th.tsens_count[th.ntsens++] = cells[i + 1];
++	}
++	n = sweet_board_u32s("/sweet-thermal", "cpufreq", cells, THERM_DOMAINS_MAX);
++	for (unsigned i = 0; i < n; ++i) {
++		if ((th.cpufreq[th.ndomains] = ml_io_map(cells[i], 0x1000))) {
++			th.ndomains++;
++		}
++	}
++	uint32_t wdt;
++	if (sweet_board_u32("/sweet-thermal", "watchdog", &wdt)) {
++		th.wdt = ml_io_map(wdt, 0x1000);
++	}
++	thread_t thread;
++	if (kernel_thread_start(therm_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -52,6 +52,7 @@ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
++extern void sweet_thermal_start(void);
+ extern void sweet_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+@@ -659,6 +660,7 @@ sweet_ufs_init(void)
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
++	sweet_thermal_start();
+ 	sweet_usb_probe();
+ 	return 0;
+ }

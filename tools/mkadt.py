@@ -78,6 +78,13 @@ BLUELINE = dict(
         ]),
         # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
         # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
+        # thermal log (bsd/dev/sweet_thermal.c): TSENS TM bases and sensor counts,
+        # cpufreq-hw domains (silver, gold), APSS watchdog
+        node('sweet-thermal', [
+            ('tsens', u32(0x0c263000, 13, 0x0c265000, 8)),
+            ('cpufreq', u32(0x17d43000, 0x17d45800)),
+            ('watchdog', u32(0x17980000)),
+        ]),
         node('sweet-touch', [
             ('compatible', cstr('st,fts')),
             ('reg', u32(0x49)),
