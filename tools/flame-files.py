@@ -11,7 +11,8 @@
 """
 import os, socket, stat, sys
 
-HOST, PORT = '127.0.0.1', 2223
+# the phone itself (192.168.7.2); PHONE_HOST=127.0.0.1 goes through FlameBridge
+HOST, PORT = os.environ.get('PHONE_HOST', '192.168.7.2'), 2223
 
 
 def conn():

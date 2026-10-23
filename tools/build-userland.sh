@@ -25,7 +25,11 @@ cat > localoptions.h <<'EOF'
 #define RSA_PRIV_FILENAME "/private/etc/dropbear/dropbear_rsa_host_key"
 #define ECDSA_PRIV_FILENAME "/private/etc/dropbear/dropbear_ecdsa_host_key"
 #define ED25519_PRIV_FILENAME "/private/etc/dropbear/dropbear_ed25519_host_key"
+#define IOSONPIXEL_SINGLE_ROOT 1
 EOF
+# The non-multiuser build insists on a kernel without getgroups() (ENOSYS) and
+# drops every connection otherwise; XNU has it. Only root logs in here anyway.
+sed -i '' 's/^#if !DROPBEAR_SVR_MULTIUSER$/#if !DROPBEAR_SVR_MULTIUSER \&\& !defined(IOSONPIXEL_SINGLE_ROOT)/' src/common-session.c
 [ -f Makefile ] || CC=$CC ./configure --host=aarch64-apple-darwin --disable-zlib --disable-lastlog \
 	--disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx --disable-pututline \
 	--disable-pututxline --disable-syslog --disable-harden >/dev/null
