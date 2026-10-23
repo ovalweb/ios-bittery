@@ -49,6 +49,7 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | Touch pins | SDA/SCL gpio27/28 (EAST, qup2), IRQ gpio125 (EAST), reset gpio99 (NORTH), AP/SLPI bus switch gpio136 (NORTH, 1 = AP) | gpio6-9, 90 |
 | Touch power | AVDD `pm8998_l19` 3.3 V (RPMh `ldoa19`), DVDD `l14a` 1.8 V (on for the panel) | `ldoc11` |
 | Touch clocks | vote `0x5200c` bits 6, 7, 12; RCG `0x17294`; halt `0x17004`, `0x17008`, `0x17290` | wrapper1 SE7 |
+| Touch I2C engine | SE2 FIFO interface fused off (`GENI_IF_DISABLE_RO` bit 0): GPI DMA `gpi_dma0` `0x800000`, GPII mask `0xfa`, SE id 2, TX channel 0 / RX 1 | SE FIFO |
 | RPMh | apps RSC DRV2 `0x179e0000`, TCS `+0xd00`, cmd-db pointer `0xc3f000c` | `0x18220000`, same pointer |
 | Buttons | PM8998 PON (PPID `0x008`): power, RESIN = volume down; volume up = PM8998 GPIO6 (PPID `0x0c5`, `0xc500`) | PM6150L GPIO2 |
 | SPMI | `0xc440000` (core), `0xe600000` (obsrvr), `0xc40a000` (cnfg) | same |
@@ -62,6 +63,7 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | `xnu/patches/0082` | Early console and stage-0 marker take the framebuffer from `boot_args->Video` instead of `0x9c000000`/1080x2400 |
 | `xnu/patches/0083` | `bsd/dev/sweet_board.c`: optional ADT values. Keys (`/sweet-keys`), RPMh RSC base (`/sweet-rpmh`, LDO allowlist `ldoc11`, `ldoa19`), USB clock status registers (`/sweet-usb`) |
 | `xnu/patches/0084` | Touch: GENI SE, GCC votes, per-pin TLMM tiles, AVDD from `/sweet-touch`; ST FTM5 protocol (FIFO command `0x86`, 8-byte events, sense on `A0 00 FF`); TX up to 8 bytes |
+| `xnu/patches/0086` | Touch I2C over GPI DMA when the SE has no FIFO (ADT `gpi-reg`, `gpi-gpii-mask`, `gpi-seid`): polled GPII (event ring + TX/RX channels in one DMA page), CONFIG0/GO/DMA TREs as in the downstream GSI I2C driver, stop/reset/start after an error |
 | `xnu/patches/0085` | `SweetDisplay.h`: one geometry for framebuffer and touch. New **fit** mode scales the 1125x2436 iPhone X screen to 997x2160 (nearest neighbour) instead of cutting 138 rows top and bottom (status bar, home indicator). Auto when cropping loses >4% of the height; `sweetfb_fit=0/1` forces it |
 | `tools/mkadt.py --board blueline` | Memory, framebuffer, CPUs (`qcom,kryo385` + `qcom,kryo470` so `SweetCPU` still matches), ECID, and the four board nodes |
 | `shim/board.h`, `BOARD=blueline shim/build.sh` | Framebuffer, IMEM; `display.c` turns on MDP autorefresh before drawing; `loader.c` checks the kernel RAM against the live FDT `/memory` and `/reserved-memory` and refuses to jump on blueline if it is not free DDR |
@@ -209,7 +211,8 @@ black bars of 41 px left and right. Read the log with TWRP:
 
 Drop `sweetkeys=0` (look for `SWEET KEYS: ... pon-apid=... volup-apid=...`),
 then `sweettouch=0` (look for `SWEET TOUCH: board st,fts`, `ftm5 ready=0
-chip-id err=0 36 39`, `selected ST FTM5`), then raise `cpus=` to 4 and 8.
+chip-id err=0 36 39`, `selected ST FTM5`; the GPI lines come first:
+`gpi gpii N states ch 0/0 ev 0`, `gpi 0x800000 gpii N se 2 started`), then raise `cpus=` to 4 and 8.
 Add `sweetfb_noconsole=1` once the kernel text is no longer needed on screen.
 
 ## Open questions
@@ -235,6 +238,10 @@ Ordered by how likely they are to stop the boot.
 5. **Touch.** FTM5 boot needs AVDD (`ldoa19`) and the bus switch on gpio136
    set to the AP; the IC firmware is not updated. The SE2 must have ABL/TZ
    loaded GENI I2C firmware (`proto=3` in the log). Polling at 100 kHz.
+   Its FIFO is fused off, so every transfer is GPI DMA (0086). The GPI
+   master (SMMU stream `0x16`) reaches DDR only if the SMMU passes it
+   through as it does UFS; a `gpi ... err=60` timeout with the event RP
+   unchanged points there.
 6. **USB** (`sweetusb=1/2`): same controller addresses as sweet; untested.
 7. **Battery**: keep the default static 100 %; `sweetbattery=1` reads
    PM6150 fuel-gauge registers and is wrong on PM8998/PMI8998.

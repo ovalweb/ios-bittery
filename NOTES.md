@@ -9,6 +9,10 @@
 > cpus=4 panics during FIPS (secondary CPU timing issue, needs investigation),
 > touch/keys/USB disabled. Next: fix cpus=4 panic, enable touch (ST FTM5).
 >
+> 2026-10-23: touch SE2 has no FIFO (GENI_IF_DISABLE_RO bit 0), so 0086 adds a
+> polled GPI DMA I2C path (gpi_dma0 0x800000, GPII from mask 0xfa, SE id 2).
+> Untested on hardware; boot with `sweettouch=1` and look for `SWEET TOUCH: gpi`.
+>
 > 2026-10-22 bring-up log:
 > - **Stage 3 flash** completed (45 chunks, `fastboot -S 256M flash userdata
 >   build/ios16-root.simg`; raw image needs img2simg first via

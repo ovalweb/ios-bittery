@@ -86,6 +86,9 @@ BLUELINE = dict(
             ('gcc-vote', u32((1 << 6) | (1 << 7) | (1 << 12))),
             ('gcc-rcg', u32(0x17294)),                          # qupv3_wrap0_s2_clk_src
             ('gcc-branches', u32(0x17004, 0x17008, 0x17290)),
+            # SE2's FIFO interface is fused off: I2C through GPI DMA (gpi_dma0),
+            # the GPIIs open to the AP (qcom,gpii-mask) and the SE's id there
+            ('gpi-reg', u32(0x00800000)), ('gpi-gpii-mask', u32(0xfa)), ('gpi-seid', u32(2)),
             ('sda', u32(SDM845_TLMM_EAST, 27, 1, 0, 0)),        # qup2, 2 mA, no pull
             ('scl', u32(SDM845_TLMM_EAST, 28, 1, 0, 0)),
             ('irq', u32(SDM845_TLMM_EAST, 125, 0, 0, 0)),       # ts_int_active
