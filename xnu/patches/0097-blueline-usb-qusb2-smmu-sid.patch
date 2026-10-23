@@ -11,9 +11,9 @@
  sweet_usb_probe(void)
  {
  	int enabled = 1;
-+	char phy[16] = "";
++	char hsphy[16] = "";
 +	uint32_t sid;
-+	if (sweet_board_str("/sweet-usb", "hs-phy", phy, sizeof(phy)) && strcmp(phy, "qusb2") == 0) {
++	if (sweet_board_str("/sweet-usb", "hs-phy", hsphy, sizeof(hsphy)) && strcmp(hsphy, "qusb2") == 0) {
 +		ud_femto = false;
 +	}
 +	if (sweet_board_u32("/sweet-usb", "smmu-sid", &sid) && sid < 0x8000u) {
