@@ -1,0 +1,35 @@
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -1481,6 +1481,16 @@ finish:
+ bool
+ OSKext::iokitDaemonAvailable(void)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * The macOS configuration waits for kernelmanagerd to send personalities
++	 * and holds the registry root busy until it does. iOS userland has no
++	 * such daemon (everything is in the kernel collection), so the registry
++	 * never went quiet and configd's InterfaceNamer never named the network
++	 * interfaces: SCNetworkInterfaceCopyAll, and Settings > About, blocked.
++	 */
++	return false;
++#endif
+ 	int notused;
+ 	if (PE_parse_boot_argn("-restore", &notused, sizeof(notused))) {
+ 		return false;
+@@ -10200,7 +10210,15 @@ OSKext::handleRequest(
+ 	    predicate->isEqualTo(kKextRequestPredicateAuxKCBundleAvailable) ||
+ 	    predicate->isEqualTo(kKextRequestPredicateDaemonReady)) {
+ 		if (!iokitDaemonAvailable()) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			OSKextLog(/* kext */ NULL, kOSKextLogErrorLevel | kOSKextLogIPCFlag,
++			    "SWEET: refusing " kIOKitDaemonName "-only request %s",
++			    predicate->getCStringNoCopy());
++			result = kOSKextReturnNotPrivileged;
++			goto finish;
++#else
+ 			panic("Received unexpected request in environment where " kIOKitDaemonName " is unavailable");
++#endif
+ 		}
+ 		if (hostPriv == HOST_PRIV_NULL) {
+ 			OSKextLog(/* kext */ NULL,
