@@ -1,0 +1,192 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -32,6 +32,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+@@ -77,6 +78,7 @@ static struct {
+ 	int ic;         /* 0: probe GT9896 / Focaltech (sweet), else TOUCH_STFTS */
+ 	uint32_t gpi_pa, gpi_mask, gpi_seid;    /* GPI DMA engine for a FIFO-less SE */
+ 	uint32_t smmu_pa, gpi_sid, ref_sid;     /* its SMMU stream; a working master's */
++	uint32_t gpi_dma_pa, gpi_dma_len;       /* optional DMA page below 4 GiB (not kernel RAM) */
+ } tb = {
+ 	.se_pa = 0x00a84000u,
+ 	.gcc_vote = (0x0fu << 18) | (1u << 23),         /* wrapper1 core/ahb + S1 */
+@@ -239,6 +241,7 @@ static struct {
+ 	uint64_t dma_pa;
+ 	unsigned gpii, ch_wp[2], ev_rp, gpi_reports;
+ 	bool gpi_cfg;           /* CONFIG0 TRE sent since the last channel start */
++	bool dma_nc;            /* DMA page mapped non-cacheable: no cache maintenance */
+ 	uint32_t ev_last[4];
+ } st;
+ static int touch_sleep_chan;
+@@ -385,6 +388,15 @@ touch_board(void)
+ 		printf("SWEET TOUCH: gpi-smmu needs <base gpi-sid ref-sid> (15-bit IDs)\n");
+ 		ok = false;
+ 	}
++	uint32_t dma[2];
++	unsigned nd = sweet_board_u32s("/sweet-touch", "gpi-dma", dma, 2);
++	if (nd == 2 && dma[1] >= PAGE_SIZE && !(dma[0] & PAGE_MASK)) {
++		tb.gpi_dma_pa = dma[0];
++		tb.gpi_dma_len = dma[1];
++	} else if (nd) {
++		printf("SWEET TOUCH: gpi-dma needs <page-aligned base, length >= one page>\n");
++		ok = false;
++	}
+ 	if (!ok || !tb.sda.tile || !tb.scl.tile || !tb.reset.tile || tb.addr > 0x7f ||
+ 	    tb.max_x == 0 || tb.max_x > 4095 || tb.max_y == 0 || tb.max_y > 4095 ||
+ 	    tb.gcc_vote == 0 || tb.rcg >= 0x60000u) {
+@@ -748,12 +760,20 @@ touch_bb_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ static void
+ touch_dma_sync(uint32_t off, uint32_t len)
+ {
++	if (st.dma_nc) {
++		__asm__ volatile ("dsb sy" ::: "memory");
++		return;
++	}
+ 	flush_dcache64((addr64_t)(st.dma_pa + off), len, TRUE);
+ }
+ 
+ static void
+ touch_dma_clean(uint32_t off, uint32_t len)
+ {
++	if (st.dma_nc) {
++		__asm__ volatile ("dsb sy" ::: "memory");
++		return;
++	}
+ 	clean_dcache64((addr64_t)(st.dma_pa + off), len, TRUE);
+ }
+ 
+@@ -1128,16 +1148,28 @@ touch_gpi_init(void)
+ 		return false;
+ 	}
+ 	st.gpii = n;
+-	if (kmem_alloc_contig(kernel_map, &st.dma, PAGE_SIZE, PAGE_MASK, 0, 0,
+-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET TOUCH: no contiguous DMA page\n");
+-		return false;
+-	}
+-	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
+-	if (!pn) {
+-		return false;
++	if (tb.gpi_dma_pa) {
++		/* outside kernel RAM, below 4 GiB: mapped write-combined (normal non-cacheable) */
++		st.dma = ml_io_map_wcomb(tb.gpi_dma_pa, PAGE_SIZE);
++		if (!st.dma) {
++			printf("SWEET TOUCH: gpi-dma %#x mapping failed\n", tb.gpi_dma_pa);
++			return false;
++		}
++		st.dma_pa = tb.gpi_dma_pa;
++		st.dma_nc = true;
++		memset((void *)st.dma, 0, GPI_RXBUF_OFF + GPI_RXBUF_LEN);
++	} else {
++		if (kmem_alloc_contig(kernel_map, &st.dma, PAGE_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++			printf("SWEET TOUCH: no contiguous DMA page\n");
++			return false;
++		}
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)st.dma);
++		if (!pn) {
++			return false;
++		}
++		st.dma_pa = ptoa_64(pn);
+ 	}
+-	st.dma_pa = ptoa_64(pn);
+ 	touch_dma_sync(0, GPI_RXBUF_OFF + GPI_RXBUF_LEN);
+ 
+ 	touch_wr(st.se, 0xe1c, 0);                                      /* SE_IRQ_EN */
+--- a/bsd/vfs/vfs_attrlist.c
++++ b/bsd/vfs/vfs_attrlist.c
+@@ -1126,7 +1126,9 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
+ 				} else {
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 					static int sweet_volattr_reports;
+-					if (sweet_volattr_reports < 16) {
++					/* devfs has no volume UUID on iOS either: not interesting */
++					if (sweet_volattr_reports < 16 &&
++					    strcmp(mnt->mnt_vfsstat.f_fstypename, "devfs") != 0) {
+ 						sweet_volattr_reports++;
+ 						printf("SWEET VFS: getattrlist %s on %s: unsupported vfs_attr bits %#llx (vol %#x common %#x)\n",
+ 						    proc_best_name(vfs_context_proc(ctx)), mnt->mnt_vfsstat.f_fstypename,
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -9,6 +9,61 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <kern/clock.h>
++#include <kern/thread_call.h>
++#include <pexpert/pexpert.h>
++
++/*
++ * Busy report: configd's InterfaceNamer only declares the network interfaces
++ * named once the IOKit registry is quiet; until then SCNetworkInterfaceCopyAll
++ * blocks (Settings > About froze on it). At 60 s and 180 s print every
++ * service that holds the registry busy and has no busy child: those are the
++ * ones whose matching/start never finished. sweetbusy=0 turns it off.
++ */
++static thread_call_t sweet_busy_call;
++static int sweet_busy_round;
++
++static void
++sweet_busy_report(thread_call_param_t, thread_call_param_t)
++{
++	IOService *root = IOService::getServiceRoot();
++	IOLog("SWEET BUSY: report %d: registry root busy %u\n", sweet_busy_round,
++	    root ? root->getBusyState() : 0);
++	IORegistryIterator *iter = root ? IORegistryIterator::iterateOver(root, gIOServicePlane,
++	    kIORegistryIterateRecursively) : NULL;
++	OSOrderedSet *all = iter ? iter->iterateAll() : NULL;
++	unsigned shown = 0;
++	for (unsigned i = 0; all && i < all->getCount() && shown < 24; ++i) {
++		IOService *s = OSDynamicCast(IOService, all->getObject(i));
++		if (!s || !s->getBusyState()) {
++			continue;
++		}
++		bool busy_child = false;
++		OSIterator *kids = s->getChildIterator(gIOServicePlane);
++		for (OSObject *o; kids && (o = kids->getNextObject());) {
++			IOService *k = OSDynamicCast(IOService, o);
++			if (k && k->getBusyState()) {
++				busy_child = true;
++				break;
++			}
++		}
++		OSSafeReleaseNULL(kids);
++		if (busy_child) {
++			continue;
++		}
++		IOService *p = s->getProvider();
++		IOLog("SWEET BUSY: '%s' <%s> busy %u, provider '%s'\n", s->getName(),
++		    s->getMetaClass()->getClassName(), s->getBusyState(), p ? p->getName() : "-");
++		shown++;
++	}
++	OSSafeReleaseNULL(all);
++	OSSafeReleaseNULL(iter);
++	if (++sweet_busy_round < 2) {
++		uint64_t deadline;
++		clock_interval_to_deadline(120, NSEC_PER_SEC, &deadline);
++		thread_call_enter_delayed(sweet_busy_call, deadline);
++	}
++}
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -31,6 +86,13 @@ SweetPlatformExpert::start(IOService *provider)
+ 	}
+ 	registerService();
+ 	IOLog("SWEET: platform expert registered\n");
++	int busy = 1;
++	(void)PE_parse_boot_argn("sweetbusy", &busy, sizeof(busy));
++	if (busy && (sweet_busy_call = thread_call_allocate(sweet_busy_report, NULL))) {
++		uint64_t deadline;
++		clock_interval_to_deadline(60, NSEC_PER_SEC, &deadline);
++		thread_call_enter_delayed(sweet_busy_call, deadline);
++	}
+ 	return true;
+ }
+ 

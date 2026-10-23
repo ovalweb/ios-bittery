@@ -91,6 +91,9 @@ BLUELINE = dict(
             ('gpi-reg', u32(0x00800000)), ('gpi-gpii-mask', u32(0xfa)), ('gpi-seid', u32(2)),
             # apps SMMU, gpi_dma0's stream and UFS's (ABL leaves UFS mapped)
             ('gpi-smmu', u32(0x15000000, 0x16, 0x100)),
+            # a DMA page below 4 GiB for the GPI engine: free DDR (Android's iomem
+            # "System RAM" from 0xa1c11000), outside the --highmem kernel RAM
+            ('gpi-dma', u32(0xf1f00000, 0x4000)),
             ('sda', u32(SDM845_TLMM_EAST, 27, 1, 0, 0)),        # qup2, 2 mA, no pull
             ('scl', u32(SDM845_TLMM_EAST, 28, 1, 0, 0)),
             ('irq', u32(SDM845_TLMM_EAST, 125, 0, 0, 0)),       # ts_int_active
