@@ -9,6 +9,14 @@
 > cpus=4 panics during FIPS (secondary CPU timing issue, needs investigation),
 > touch/keys/USB disabled. Next: fix cpus=4 panic, enable touch (ST FTM5).
 >
+> **2026-10-23 (later): 4 cores stable, Settings > General > About opens** (kernel
+> 0093; `tools/mkboot-blueline.sh ios` now builds this set: cpus=4, touch,
+> keys). About froze in SCNetworkInterfaceCopyAll: the macOS kernel config held
+> the IOKit registry busy for kernelmanagerd (0092) and configd's InterfaceNamer
+> needs an IONetworkStack before it publishes IOKit quiet (0093 stand-in).
+> SMMU stream mapping works the Linux way (0090); the GPI DMA engine needs
+> 32-bit DMA addresses (0091). Unattended test rounds: `build/scripts/test-round.sh`.
+>
 > **2026-10-23: 🎉 TOUCH WORKS on the Pixel 3** (boot image
 > `shim/out/blueline-ios-touch3.img`: kernel 0088, `cpus=2 sweetfb_noconsole=1
 > sweettouch=1 sweetkeys=1 ufslogsecs=1`). Touch SE2 has no FIFO; GPI DMA

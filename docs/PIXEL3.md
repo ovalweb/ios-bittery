@@ -67,6 +67,7 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | `xnu/patches/0087` | GPI stream mapping: dumps the apps SMMU stream table; when `gpi_dma0`'s stream (`0x16`) has no SMR, gives it a free one with UFS's S2CR (ADT `gpi-smmu`); the write is opt-in (`sweettouchsmmu=1`) since the hypervisor resets the phone on it |
 | `xnu/patches/0088` | Touch I2C bit-banged on gpio27/28 (GPIO function, open drain, ~100 kHz, clock stretching) when the SE has no FIFO; GPI DMA only with `sweettouchgpi=1` |
 | `xnu/patches/0089`-`0092` | 0089: default volume quota/reserved sizes for HFS+. 0090: SMMU stream mapping the Linux way (bypass refused -> last context bank as bypass, no reset). 0091: IOKit busy report; GPI DMA page below 4 GiB (`gpi-dma`), which the GPI engine needs. 0092: no IOKit daemon on iOS, so the registry root is not held busy (configd's InterfaceNamer waited for IOKit quiet; Settings > About froze in `SCNetworkInterfaceCopyAll`) |
+| `xnu/patches/0093` | `IONetworkStack` stand-in (IOResources match): configd's InterfaceNamer opens it before it publishes IOKit quiet; Settings > About opens |
 | `xnu/patches/0085` | `SweetDisplay.h`: one geometry for framebuffer and touch. New **fit** mode scales the 1125x2436 iPhone X screen to 997x2160 (nearest neighbour) instead of cutting 138 rows top and bottom (status bar, home indicator). Auto when cropping loses >4% of the height; `sweetfb_fit=0/1` forces it |
 | `tools/mkadt.py --board blueline` | Memory, framebuffer, CPUs (`qcom,kryo385` + `qcom,kryo470` so `SweetCPU` still matches), ECID, and the four board nodes |
 | `shim/board.h`, `BOARD=blueline shim/build.sh` | Framebuffer, IMEM; `display.c` turns on MDP autorefresh before drawing; `loader.c` checks the kernel RAM against the live FDT `/memory` and `/reserved-memory` and refuses to jump on blueline if it is not free DDR |
@@ -212,8 +213,8 @@ black bars of 41 px left and right. Read the log with TWRP:
 
 ### 4. Buttons, touch, more cores
 
-Working set (2026-10-23, touch and keys on): `tools/mkboot-blueline.sh ios cpus=2
-sweetfb_noconsole=1 sweettouch=1 sweetkeys=1 ufslogsecs=1`.
+Working set (2026-10-23): `tools/mkboot-blueline.sh ios` (cpus=4, touch, keys,
+no boot text; add `ufslogsecs=1` to flush the log every second).
 
 Drop `sweetkeys=0` (look for `SWEET KEYS: ... pon-apid=... volup-apid=...`),
 then `sweettouch=0` (look for `SWEET TOUCH: board st,fts`, `ftm5 ready=0

@@ -5,7 +5,8 @@
 #
 #   shim     stage 1: the shim alone (display autorefresh, UFS probe)
 #   kernel   stage 2: xnu without the iOS root (one CPU, no touch/keys/USB)
-#   ios      stage 3: iOS from the root in userdata (flash ios16-root.img first)
+#   ios      stage 3: iOS from the root in userdata (flash ios16-root.img first):
+#            4 cores, touch and buttons on (the set that works, 2026-10-23)
 #
 # Output: shim/out/blueline-STAGE.img, for `fastboot boot`. Extra boot-args
 # are appended, e.g. `tools/mkboot-blueline.sh ios sweetkeys=1 sweettouch=1`
@@ -27,7 +28,7 @@ base='debug=0xc serial=3 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0
 case $stage in
 shim) ;;
 kernel) args="$base cpus=1 sweettouch=0 sweetkeys=0 sweetusb=0" ;;
-ios) args="$base cpus=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 sweetfb_hz=30 sweettouch=0 sweetkeys=0 sweetusb=0" ;;
+ios) args="$base cpus=4 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 sweetfb_hz=30 sweetfb_noconsole=1 sweettouch=1 sweetkeys=1 sweetusb=0" ;;
 *) sed -n '2,17p' "$0"; exit 2 ;;
 esac
 [ -f "$DTB" ] || { echo "no stock DTB at $DTB: see docs/PIXEL3.md stage 0 (DTB=path to override)" >&2; exit 1; }
