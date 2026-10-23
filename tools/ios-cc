@@ -1,0 +1,9 @@
+#!/bin/bash
+# clang for iOS 16 arm64 without Xcode: macOS SDK headers, link stubs from
+# tools/ios-sdk.sh (IOSSDK, default build/iossdk). The linker signs arm64
+# output ad hoc; the phone's AMFI stand-in accepts that.
+#   tools/ios-cc [clang args...]   e.g. tools/ios-cc -O2 -o out/wland wland.c ...
+iossdk=${IOSSDK:-$(cd "$(dirname "$0")/../.." && pwd)/build/iossdk}
+[ -f "$iossdk/lib/libSystem.tbd" ] || { echo "ios-cc: no $iossdk/lib/libSystem.tbd (run tools/ios-sdk.sh)" >&2; exit 1; }
+exec clang -target arm64-apple-ios16.0 -isysroot "$(xcrun --show-sdk-path)" -Wno-incompatible-sysroot \
+	-nostdlib -L "$iossdk/lib" -F "$iossdk/Frameworks" -lSystem "$@"
