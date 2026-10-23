@@ -45,6 +45,16 @@ cd "$U/src/dash"
 make -j8 CC_FOR_BUILD=clang >/dev/null
 cp src/dash "$U/stage/"
 
+# toybox: ls, ps, cat, ... (iOS ships none of them). Its build needs GNU sed
+# (brew install gnu-sed); iconv is not in the iOS link stubs.
+cd "$U/src"
+[ -d toybox ] || git clone -q --depth 1 --branch 0.8.11 https://github.com/landley/toybox.git toybox
+cd toybox
+export PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:$PATH"
+[ -f .config ] || { make macos_defconfig >/dev/null; sed -i 's/^CONFIG_ICONV=y/# CONFIG_ICONV is not set/' .config; }
+make CC=$CC HOSTCC=clang toybox >/dev/null
+cp toybox "$U/stage/"
+
 for b in "$U"/stage/*; do
 	codesign -f -s - "$b" 2>/dev/null
 	if nm -m "$b" | grep -q 'weak external'; then
