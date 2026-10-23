@@ -1,0 +1,132 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -392,10 +392,14 @@ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ 	 */
+ 	bool ok = res && ((!strcmp(res, "ldoc11") && mv >= 2950 && mv <= 3400) ||
+ 	    (!strcmp(res, "ldoa19") && mv >= 2950 && mv <= 3400) ||
++	    /* Pixel 3 QUSB2 PHY (bsd/dev/sweet_usb.c): vdd, vdda-pll, vdda-phy-dpdm */
++	    (!strcmp(res, "ldoa1") && mv == 880) ||
++	    (!strcmp(res, "ldoa12") && mv == 1800) ||
++	    (!strcmp(res, "ldoa24") && mv >= 3000 && mv <= 3100) ||
+ 	    (!strcmp(res, "ldoa14") && mv >= 1800 && mv <= 1840) ||
+ 	    (!strcmp(res, "ldoa17") && mv >= 2856 && mv <= 3008));
+ 	if (!ok) {
+-		printf("SWEET RPMH: %s %u mV is not an allowed touch rail\n", res ? res : "?", mv);
++		printf("SWEET RPMH: %s %u mV is not an allowed rail\n", res ? res : "?", mv);
+ 		return EINVAL;
+ 	}
+ 	printf("SWEET RPMH: %s %u mV\n", res, mv);
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1313,7 +1313,65 @@ ud_hsphy_init(void)
+ 	ud_hsphy_dump(p, "after init");
+ }
+ 
+-static void
++static /*
++ * QUSB2 v2 PHY bring-up, as Linux phy-qcom-qusb2.c does it for
++ * qcom,sdm845-qusb2-phy: the Pixel 3's ABL leaves the PHY disabled
++ * (PWR_CTRL1 = VREF_SUPPLY_TRIM | CLAMP_N_EN | POWER_DOWN), so the DWC3 had
++ * no UTMI clock and its endpoint commands timed out. Supplies from the
++ * Pixel 3 DT (vdd l1a 0.88 V, vdda-pll l12a 1.8 V, vdda-phy-dpdm l24a
++ * 3.088 V), the PHY reset GCC_QUSB2PHY_PRIM_BCR (0x12000), then the init
++ * table, power up, and CORE_READY. Efuse HSTX trim is not applied.
++ */
++extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
++#define QUSB2_PWR_CTRL1         0x210
++#define QUSB2_PLL_STATUS        0x1a0
++#define QUSB2_POWER_DOWN        0x01u
++#define QUSB2_DISABLE           0x23u   /* VREF_SUPPLY_TRIM | CLAMP_N_EN | POWER_DOWN */
++#define GCC_QUSB2PHY_PRIM_BCR   0x12000
++
++static int
++ud_qusb2_init(void)
++{
++	static const struct {
++		uint16_t off;
++		uint8_t val;
++	} tbl[] = {
++		{0x004, 0x03}, {0x18c, 0x7c}, {0x02c, 0x80}, {0x184, 0x0a}, {0x0b4, 0x19},
++		{0x194, 0x40}, {0x198, 0x20}, {0x214, 0x21}, {0x220, 0x00}, {0x224, 0x58},
++		{0x240, 0x30}, {0x244, 0x29}, {0x248, 0xca}, {0x24c, 0x04}, {0x250, 0x03},
++		{0x23c, 0x00},
++	};
++	int v1 = sweet_rpmh_vreg_enable("ldoa1", 880);
++	int v12 = sweet_rpmh_vreg_enable("ldoa12", 1800);
++	int v24 = sweet_rpmh_vreg_enable("ldoa24", 3088);
++	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
++	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
++	if (!gcc || !phy) {
++		return -1;
++	}
++	uint32_t before = usb_rd(phy, QUSB2_PWR_CTRL1) & 0xff;
++	*(volatile uint32_t *)(gcc + GCC_QUSB2PHY_PRIM_BCR) = 1;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(150);
++	*(volatile uint32_t *)(gcc + GCC_QUSB2PHY_PRIM_BCR) = 0;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(10);
++	*(volatile uint32_t *)(phy + QUSB2_PWR_CTRL1) = (usb_rd(phy, QUSB2_PWR_CTRL1) & 0xff) | QUSB2_DISABLE;
++	for (unsigned i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++) {
++		*(volatile uint32_t *)(phy + tbl[i].off) = tbl[i].val;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint32_t *)(phy + QUSB2_PWR_CTRL1) = (usb_rd(phy, QUSB2_PWR_CTRL1) & 0xff) & ~QUSB2_POWER_DOWN;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(300);
++	uint32_t status = usb_rd(phy, QUSB2_PLL_STATUS) & 0xff;
++	printf("SWEET USB: QUSB2 init: rails %d/%d/%d, PWR_CTRL1 %#x -> %#x, PLL_STATUS %#x (%s)\n",
++	    v1, v12, v24, before, usb_rd(phy, QUSB2_PWR_CTRL1) & 0xff, status,
++	    (status & 1u) ? "core ready" : "NOT ready");
++	return (status & 1u) ? 0 : -1;
++}
++
++void
+ sweet_usb_gadget_start(vm_offset_t dwc)
+ {
+ 	thread_t thread;
+@@ -1355,6 +1413,11 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+ 		return;
+ 	}
+ 
++	if (!ud_femto && sweet_board_present("/sweet-usb") && ud_qusb2_init() != 0) {
++		printf("SWEET USB: QUSB2 PHY did not come up; not starting the device\n");
++		return;
++	}
++
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+ 	int i;
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -224,16 +224,23 @@ SweetBattery::estimatePercent(unsigned mv)
+ void
+ SweetBattery::pollPmi8998(void)
+ {
+-	uint8_t msoc, usb, charger;
+-	uint16_t rawVoltage, rawCurrent;
+-	bool valid = fReal &&
+-	    !sweet_spmi_read(fSid, 0x4009, &msoc) &&
+-	    readWord(fSid, 0x41a0, &rawVoltage) &&
+-	    !sweet_spmi_read(fSid, 0x1310, &usb) &&
+-	    !sweet_spmi_read(fSid, 0x1006, &charger);
++	uint8_t msoc = 0, usb = 0, charger = 0;
++	uint16_t rawVoltage = 0, rawCurrent;
++	int rs = fReal ? sweet_spmi_read(fSid, 0x4009, &msoc) : -2;
++	bool rv = fReal && readWord(fSid, 0x41a0, &rawVoltage);
++	int ru = fReal ? sweet_spmi_read(fSid, 0x1310, &usb) : -2;
++	int rc = fReal ? sweet_spmi_read(fSid, 0x1006, &charger) : -2;
++	bool valid = fReal && !rs && rv && !ru && !rc;
+ 	unsigned mv = valid ? (unsigned)(((uint64_t)rawVoltage * 122070u) / 1000000u) : 0;
+ 	/* A stopped gauge or a misread must not become an empty battery. */
+ 	valid = valid && mv >= 2800 && mv <= 4600 && !(msoc == 0 && mv > 3500);
++	static unsigned diag;
++	if ((!valid && diag < 3) || diag == 0) {
++		diag++;
++		IOLog("SWEET BATTERY: PMI8998 sid %u: msoc rc %d = %u, vbatt %s = %#x (%u mV), usb rc %d = %#x, chgr rc %d = %#x -> %s\n",
++		    fSid, rs, msoc, rv ? "ok" : "fail", rawVoltage, mv, ru, usb, rc, charger,
++		    valid ? "valid" : "fallback");
++	}
+ 	if (!valid) {
+ 		publish(100, 4200, 0, true, true, false, true, false, false);
+ 		return;
