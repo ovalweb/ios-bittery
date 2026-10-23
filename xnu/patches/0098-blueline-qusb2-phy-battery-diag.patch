@@ -18,12 +18,11 @@
  	printf("SWEET RPMH: %s %u mV\n", res, mv);
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
-@@ -1313,7 +1313,65 @@ ud_hsphy_init(void)
+@@ -1313,6 +1313,64 @@ ud_hsphy_init(void)
  	ud_hsphy_dump(p, "after init");
  }
  
--static void
-+static /*
++/*
 + * QUSB2 v2 PHY bring-up, as Linux phy-qcom-qusb2.c does it for
 + * qcom,sdm845-qusb2-phy: the Pixel 3's ABL leaves the PHY disabled
 + * (PWR_CTRL1 = VREF_SUPPLY_TRIM | CLAMP_N_EN | POWER_DOWN), so the DWC3 had
@@ -81,10 +80,9 @@
 +	return (status & 1u) ? 0 : -1;
 +}
 +
-+void
+ static void
  sweet_usb_gadget_start(vm_offset_t dwc)
  {
- 	thread_t thread;
 @@ -1355,6 +1413,11 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		return;
  	}
