@@ -1,0 +1,244 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -11,8 +11,10 @@
+  * (blueline, SDM845; Linux drivers/input/touchscreen/stm/fts.c in Google's
+  * android-msm-crosshatch-4.9): event FIFO at command 0x86, 8-byte events.
+  * Its only IC writes are the vendor's "sense on" scan-mode command.
+- * The Pixel 3's touch SE has its FIFO interface fused off, so its I2C runs
+- * through the wrapper's GPI DMA engine (ADT gpi-reg), polled: see touch_gpi_*.
++ * The Pixel 3's touch SE has its FIFO interface fused off. Its I2C is then
++ * bit-banged on the SE's own pins (touch_bb_*); the wrapper's GPI DMA engine
++ * (touch_gpi_*, sweettouchgpi=1) needs an SMMU stream mapping the hypervisor
++ * refuses to the kernel.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -226,6 +228,7 @@ static struct {
+ static struct {
+ 	vm_offset_t se, gcc;
+ 	bool started, dead, probing;
++	bool bb, bb_ready;      /* bit-banged bus; recovered after the first use */
+ 	int kind, irq_hint;
+ 	uint32_t irq_status, irq_last, active;
+ 	unsigned sent, got;
+@@ -574,6 +577,165 @@ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ 	return err;
+ }
+ 
++/*
++ * Bit-banged I2C on the SE's SDA/SCL pins (Linux i2c-gpio, i2c-algo-bit),
++ * for an SE without FIFO when GPI DMA is unusable. Open drain: a line is
++ * driven low (output, latch 0) or released to the bus pull-ups (input).
++ * About 100 kHz; the IC may stretch SCL.
++ */
++#define BB_HALF_US      5u
++
++static void
++touch_bb_line(const struct touch_pin *p, bool high)
++{
++	uint32_t cfg = touch_rd(p->va, 0) & ~0x3ffu;
++	touch_wr(p->va, 0, cfg | (p->mux << 2) | p->pull | (p->drive << 6) | (high ? 0u : 0x200u));
++}
++
++static bool
++touch_bb_scl_high(void)
++{
++	touch_bb_line(&tb.scl, true);
++	for (unsigned i = 0; i < 2000; ++i) {   /* clock stretching up to 2 ms */
++		if (touch_gpio_io(&tb.scl) & 1u) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static int
++touch_bb_bit_out(bool b)
++{
++	touch_bb_line(&tb.sda, b);
++	delay(BB_HALF_US);
++	if (!touch_bb_scl_high()) {
++		return ETIMEDOUT;
++	}
++	delay(BB_HALF_US);
++	touch_bb_line(&tb.scl, false);
++	return 0;
++}
++
++static int
++touch_bb_bit_in(bool *b)
++{
++	touch_bb_line(&tb.sda, true);
++	delay(BB_HALF_US);
++	if (!touch_bb_scl_high()) {
++		return ETIMEDOUT;
++	}
++	delay(BB_HALF_US);
++	*b = (touch_gpio_io(&tb.sda) & 1u) != 0;
++	touch_bb_line(&tb.scl, false);
++	return 0;
++}
++
++/* START, or a repeated START after a stretched message: SDA falls, SCL high. */
++static int
++touch_bb_start(void)
++{
++	touch_bb_line(&tb.sda, true);
++	delay(BB_HALF_US);
++	if (!touch_bb_scl_high()) {
++		return ETIMEDOUT;
++	}
++	if (!(touch_gpio_io(&tb.sda) & 1u)) {
++		return EBUSY;   /* a device holds SDA */
++	}
++	delay(BB_HALF_US);
++	touch_bb_line(&tb.sda, false);
++	delay(BB_HALF_US);
++	touch_bb_line(&tb.scl, false);
++	return 0;
++}
++
++static void
++touch_bb_stop(void)
++{
++	touch_bb_line(&tb.sda, false);
++	delay(BB_HALF_US);
++	(void)touch_bb_scl_high();
++	delay(BB_HALF_US);
++	touch_bb_line(&tb.sda, true);
++	delay(BB_HALF_US);
++}
++
++/* 0 on ACK, ENXIO on NACK */
++static int
++touch_bb_byte_out(uint8_t v)
++{
++	bool nack = true;
++	for (int i = 7; i >= 0; --i) {
++		int err = touch_bb_bit_out(((v >> i) & 1u) != 0);
++		if (err) {
++			return err;
++		}
++	}
++	int err = touch_bb_bit_in(&nack);
++	return err ? err : nack ? ENXIO : 0;
++}
++
++static int
++touch_bb_byte_in(uint8_t *v, bool ack)
++{
++	unsigned x = 0;
++	for (unsigned i = 0; i < 8; ++i) {
++		bool b = false;
++		int err = touch_bb_bit_in(&b);
++		if (err) {
++			return err;
++		}
++		x = (x << 1) | (b ? 1u : 0u);
++	}
++	*v = (uint8_t)x;
++	return touch_bb_bit_out(!ack);
++}
++
++/* touch_msg_run on the bit-banged bus. */
++static int
++touch_bb_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
++    unsigned nr, bool stretch)
++{
++	if (st.dead || (nt && nr) || (!nt && !nr)) {
++		return EIO;
++	}
++	if (!st.bb_ready) {
++		/* Bus recovery: clock out a device left mid-byte, then STOP. */
++		touch_wr(tb.sda.va, TOUCH_GPIO_IO, 0);  /* output latches low */
++		touch_wr(tb.scl.va, TOUCH_GPIO_IO, 0);
++		touch_bb_line(&tb.sda, true);
++		for (unsigned i = 0; i < 9 && !(touch_gpio_io(&tb.sda) & 1u); ++i) {
++			touch_bb_line(&tb.scl, false);
++			delay(BB_HALF_US);
++			(void)touch_bb_scl_high();
++			delay(BB_HALF_US);
++		}
++		touch_bb_stop();
++		printf("SWEET TOUCH: bb bus idle sda=%u scl=%u\n", touch_gpio_io(&tb.sda) & 1u,
++		    touch_gpio_io(&tb.scl) & 1u);
++		st.bb_ready = true;
++	}
++	int err = touch_bb_start();
++	if (!err) {
++		err = touch_bb_byte_out((uint8_t)((addr << 1) | (nr ? 1u : 0u)));
++	}
++	for (unsigned i = 0; !err && i < nt; ++i) {
++		err = touch_bb_byte_out(tx[i]);
++		if (err == ENXIO) {
++			err = EIO;      /* data NACK; ENXIO is reserved for the address */
++		}
++	}
++	for (unsigned i = 0; !err && i < nr; ++i) {
++		err = touch_bb_byte_in(&rx[i], i + 1 < nr);
++	}
++	if (err || !stretch) {
++		touch_bb_stop();
++	}
++	return err;
++}
++
+ static void
+ touch_dma_sync(uint32_t off, uint32_t len)
+ {
+@@ -816,12 +978,13 @@ touch_smmu_match(unsigned nsmr, uint32_t sid)
+  * SDM845's hypervisor faults DMA from apps SMMU streams that have no stream
+  * mapping; Linux arm-smmu-qcom.c keeps the ones ABL left. ABL never used the
+  * GPI master, so give its stream a free SMR whose S2CR copies the one of a
+- * master ABL left working (UFS). sweettouchsmmu=0 only reports.
++ * master ABL left working (UFS). Only with sweettouchsmmu=1: on the Pixel 3
++ * the hypervisor resets the phone on these writes (boot 2026-10-23).
+  */
+ static void
+ touch_gpi_smmu(void)
+ {
+-	int enable = 1;
++	int enable = 0;
+ 	(void)PE_parse_boot_argn("sweettouchsmmu", &enable, sizeof(enable));
+ 	st.smmu = ml_io_map(tb.smmu_pa, 0x20000);
+ 	if (!st.smmu) {
+@@ -970,9 +1133,14 @@ touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ {
+ 	st.irq_status = st.irq_last = 0;
+ 	st.sent = st.got = 0;
+-	int err = st.gpi ? touch_gpi_msg(addr, tx, nt, rx, nr, stretch) :
++	int err = st.bb ? touch_bb_msg(addr, tx, nt, rx, nr, stretch) :
++	    st.gpi ? touch_gpi_msg(addr, tx, nt, rx, nr, stretch) :
+ 	    touch_msg_run(addr, tx, nt, rx, nr, stretch);
+-	if (st.probing && !st.gpi) {
++	if (st.probing && st.bb) {
++		printf("SWEET TOUCH: probe bb addr=%#x %s len=%u stretch=%u err=%d sda=%u scl=%u\n",
++		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u, err,
++		    touch_gpio_io(&tb.sda) & 1u, touch_gpio_io(&tb.scl) & 1u);
++	} else if (st.probing && !st.gpi) {
+ 		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
+ 		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
+ 		    err, st.irq_last, st.irq_status, st.sent, st.got,
+@@ -1292,8 +1460,19 @@ touch_se_init(void)
+ 	printf("SWEET TOUCH: se %#x fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
+ 	    tb.se_pa, fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
+ 	    touch_rd(st.se, 0x908));
+-	if (((fw >> 8) & 0xffu) == 3u && (touch_rd(st.se, SE_FIFO_OFF) & 1u) && tb.gpi_pa) {
+-		return touch_gpi_init();
++	if (touch_rd(st.se, SE_FIFO_OFF) & 1u) {
++		int gpi = 0;
++		(void)PE_parse_boot_argn("sweettouchgpi", &gpi, sizeof(gpi));
++		if (gpi && tb.gpi_pa && ((fw >> 8) & 0xffu) == 3u) {
++			return touch_gpi_init();
++		}
++		/* The pins leave the SE: GPIO function, pull-ups as a backstop. */
++		printf("SWEET TOUCH: SE has no FIFO: bit-banged I2C on gpio%u/%u (sweettouchgpi=1: GPI DMA)\n",
++		    tb.sda.pin, tb.scl.pin);
++		tb.sda.mux = tb.scl.mux = 0;
++		tb.sda.pull = tb.scl.pull = 3;
++		st.bb = true;
++		return true;
+ 	}
+ 	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, SE_FIFO_OFF) & 1u) ||
+ 	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
