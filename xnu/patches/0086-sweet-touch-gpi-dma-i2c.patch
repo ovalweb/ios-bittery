@@ -9,7 +9,7 @@
   */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
-@@ -20,6 +22,9 @@
+@@ -20,10 +22,14 @@
  #include <kern/thread.h>
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
@@ -19,7 +19,12 @@
  #include <pexpert/pexpert.h>
  #include "sweet_board.h"
  
-@@ -67,6 +72,7 @@ static struct {
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+@@ -67,6 +73,7 @@ static struct {
  	char avdd[16];
  	uint32_t avdd_mv, addr, max_x, max_y;
  	int ic;         /* 0: probe GT9896 / Focaltech (sweet), else TOUCH_STFTS */
@@ -27,7 +32,7 @@
  } tb = {
  	.se_pa = 0x00a84000u,
  	.gcc_vote = (0x0fu << 18) | (1u << 23),         /* wrapper1 core/ahb + S1 */
-@@ -124,6 +130,85 @@ static struct {
+@@ -124,6 +131,85 @@ static struct {
   * MSB-to-LSB, length 8, STOP only on vector 3. FIFO bytes remain LSB first. */
  #define SE_PACK0        0x0007f8feu
  #define SE_PACK1        0x000ffefeu
@@ -113,7 +118,7 @@
  
  static struct {
  	vm_offset_t se, gcc;
-@@ -133,6 +218,12 @@ static struct {
+@@ -133,6 +219,12 @@ static struct {
  	unsigned sent, got;
  	unsigned clk_level;     /* DFS performance level of the 19.2 MHz SE clock */
  	int x[TOUCH_MAX], y[TOUCH_MAX];
@@ -126,7 +131,7 @@
  } st;
  static int touch_sleep_chan;
  
-@@ -259,6 +350,14 @@ touch_board(void)
+@@ -259,6 +351,14 @@ touch_board(void)
  	    touch_board_pin("irq", &tb.irq) && touch_board_pin("reset", &tb.reset) &&
  	    touch_board_pin("vdd-enable", &tb.vdd) && touch_board_pin("bus-switch", &tb.bus);
  	tb.nbranches = nb;
@@ -141,7 +146,7 @@
  	if (!ok || !tb.sda.tile || !tb.scl.tile || !tb.reset.tile || tb.addr > 0x7f ||
  	    tb.max_x == 0 || tb.max_x > 4095 || tb.max_y == 0 || tb.max_y > 4095 ||
  	    tb.gcc_vote == 0 || tb.rcg >= 0x60000u) {
-@@ -451,14 +550,329 @@ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+@@ -451,14 +551,329 @@ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
  	return err;
  }
  
@@ -473,7 +478,7 @@
  		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
  		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
  		    err, st.irq_last, st.irq_status, st.sent, st.got,
-@@ -778,7 +1192,10 @@ touch_se_init(void)
+@@ -778,7 +1193,10 @@ touch_se_init(void)
  	printf("SWEET TOUCH: se %#x fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
  	    tb.se_pa, fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
  	    touch_rd(st.se, 0x908));
