@@ -75,9 +75,9 @@ BLUELINE = dict(
         # usb_phy_cfg_ahb2phy, usb3_prim_clkref
         node('sweet-usb', [
             ('gcc-cbcr', u32(0xf00c, 0xf010, 0xf014, 0x502c, 0x8201c, 0x6a004, 0x8c008)),
+            ('smmu-sid', u32(0x740)),                           # usb_1 dwc3 iommus
+            ('hs-phy', cstr('qusb2')),                          # QUSB2 v2, as ABL leaves it
         ]),
-        # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
-        # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
         # the shim arms the APSS watchdog (30 s bite); SweetPlatformExpert pets it
         node('sweet-watchdog', [('reg', u32(0x17980000))]),
         # SweetBattery: PMI8998 fuel gauge and SMB2 charger on SPMI SID 2; 2915 mAh
@@ -93,6 +93,8 @@ BLUELINE = dict(
             ('cpufreq', u32(0x17d43000, 0x17d45800)),
             ('watchdog', u32(0x17980000)),
         ]),
+        # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
+        # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
         node('sweet-touch', [
             ('compatible', cstr('st,fts')),
             ('reg', u32(0x49)),
