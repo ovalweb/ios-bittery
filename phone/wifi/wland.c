@@ -1041,6 +1041,11 @@ int main(int argc, char **argv)
 	} else if (!strcmp(c, "smp2p-init")) {
 		return smp2p_init() ? 1 : 0;
 	} else if (!strcmp(c, "shutdown")) {
+#if MSS_SELF_AUTH
+		/* not a PAS image: TrustZone's PAS shutdown never returned (Pixel 3). Needs the q6v5 stop sequence. */
+		fprintf(stderr, "shutdown: not implemented for the self-authenticating modem; reboot the phone\n");
+		return 1;
+#endif
 		uint64_t r1 = 0;
 		int64_t rc = scm(6, 1, PAS_MODEM, 0, 0, &r1);	/* PAS_SHUTDOWN */
 		printf("shutdown -> %lld/%llx\n", (long long)rc, (unsigned long long)r1);

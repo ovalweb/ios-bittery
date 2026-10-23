@@ -4,6 +4,7 @@
  * channel. The modem is QRTR node 0; we are node 1.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "glink.h"
@@ -27,6 +28,17 @@ static uint8_t rxbuf[65536];
 static uint32_t rxoff;
 
 static qrtr_cb_t qrtr_cb;
+
+/*
+ * While link_send waits for an intent it polls the link; a packet that
+ * arrives then is queued, not handled: its handler may send too (a second
+ * TFTP transfer) and take the intent the waiting send asked for. On the
+ * Pixel 3 that stalled wlanmdsp.mbn mid-transfer until the modem's WLAN PD
+ * grace timer expired (ERR-FATAL).
+ */
+static int send_depth;
+struct deferred { struct deferred *next; uint32_t n; uint8_t d[]; };
+static struct deferred *dq_head, **dq_tail = &dq_head;
 
 int verbose_link = 1;
 unsigned link_stats[4];
@@ -203,7 +215,16 @@ static int rx_one(void)
 			uint32_t n = rxoff;
 			rxoff = 0;
 			glink_send(GLINK_CMD_RX_DONE_W_REUSE, LCID, p2, NULL, 0);
-			handle_data(rxbuf, n);
+			struct deferred *e;
+			if (send_depth && (e = malloc(sizeof(*e) + n))) {
+				e->next = NULL;
+				e->n = n;
+				memcpy(e->d, rxbuf, n);
+				*dq_tail = e;
+				dq_tail = &e->next;
+			} else {
+				handle_data(rxbuf, n);
+			}
 			return 1;
 		}
 		break;
@@ -265,8 +286,32 @@ static int find_intent(uint32_t len)
 	return best;
 }
 
-/* One packet into one of the modem's intents (requested if none fits), in chunks of 8K as Linux does. */
+static int link_send_one(const void *data, uint32_t len);
+
+/* Packets that came in while a send waited, in order (their handlers may send). */
+static void drain_deferred(void)
+{
+	while (dq_head) {
+		struct deferred *e = dq_head;
+		dq_head = e->next;
+		if (!dq_head)
+			dq_tail = &dq_head;
+		handle_data(e->d, e->n);
+		free(e);
+	}
+}
+
 int link_send(const void *data, uint32_t len)
+{
+	send_depth++;
+	int rc = link_send_one(data, len);
+	if (--send_depth == 0)
+		drain_deferred();
+	return rc;
+}
+
+/* One packet into one of the modem's intents (requested if none fits), in chunks of 8K as Linux does. */
+static int link_send_one(const void *data, uint32_t len)
 {
 	uint64_t start = now_ms(), end = start + 3000;
 	int i, asked = 0;

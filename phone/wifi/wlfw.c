@@ -33,8 +33,7 @@
 #define CLIENT_ID	0x4b4e454c	/* ath10k's */
 #include "soc.h"		/* MSA_PA: the wlan_fw_region */
 #define MSA_SIZE	0x100000u	/* qcom,wlan-msa-memory */
-#define BDF_PATH	"/var/local/fw/modem/bdwlan-flame.bin"
-#define BDF_PATH2	"/var/local/fw/modem/bdwlan-flame-PROTO1.1.bin"
+#define BDF_PATH	"/var/local/fw/modem/" WLAN_BDF	/* soc.h */
 
 static uint32_t srv_node, srv_port;
 static int srv_up, started;
@@ -250,7 +249,10 @@ int wlfw_start(void)
 	if (!fw_ready) {
 		if (!getenv("WLFW_NO_HOSTCAP")) {	/* downstream icnss never sends it */
 			qmi_start(&q, QMI_REQUEST, 0, HOST_CAP);
-			qmi_tlv_u32(&q, 0x10, 0);	/* daemon_support */
+			if (WLFW_HOST_CAP_8BIT)
+				qmi_tlv_u8(&q, 0x10, 0);	/* daemon_support (ath10k 8-bit host cap quirk) */
+			else
+				qmi_tlv_u32(&q, 0x10, 0);	/* daemon_support */
 			int e = request(&q, &r, 5000);
 			if (e && e != 0x5e)		/* QMI_ERR_NOT_SUPPORTED: older firmware */
 				return -1;

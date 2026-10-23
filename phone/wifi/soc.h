@@ -20,6 +20,8 @@
 /* WCN3990 supplies (PM8998, PMIC4 LDO HPM = 7): cx-mx, xo, rfa, ch0 */
 #define WLAN_LDOS	{ "ldoa5", 800 }, { "ldoa7", 1800 }, { "ldoa17", 1304 }, { "ldoa25", 3300 }
 #define WLAN_QDSS_QMP	0		/* no QDSS clock message on SDM845 */
+#define WLAN_BDF	"bdwlan-blueline.bin"	/* vendor /firmware/wlan/qca_cld */
+#define WLFW_HOST_CAP_8BIT 1		/* qcom,snoc-host-cap-8bit-quirk: daemon_support is one byte */
 #else
 #define SOC_NAME	"sm8150"
 #define APCS_IPC	0x17c0000cull	/* apss_shared + 12: write BIT(n) */
@@ -30,6 +32,8 @@
 #define MSS_SELF_AUTH	0
 #define WLAN_LDOS	{ "ldoa1", 752 }, { "ldoa7", 1800 }, { "ldoc2", 1304 }, { "ldoc11", 3104 }
 #define WLAN_QDSS_QMP	1
+#define WLAN_BDF	"bdwlan-flame.bin"
+#define WLFW_HOST_CAP_8BIT 0
 #endif
 
 #endif

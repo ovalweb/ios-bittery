@@ -356,6 +356,7 @@ struct htc_ep { uint16_t svc, max_msg; uint8_t ul, dl, seq, credits, up, credit_
 static struct htc_ep ep[EP_MAX];
 static uint8_t wmi_eid = 0xff, htt_eid = 0xff;
 static int htc_ready, htc_setup;
+static uint16_t htc_credits;		/* the target's total (HTC READY) */
 
 static int htc_send(uint8_t eid, const void *payload, uint32_t len)
 {
@@ -393,7 +394,7 @@ static void htc_connect(uint16_t svc)
 }
 
 /* WMI waits here while its endpoint has no credit */
-#define WMIQ_LEN	8
+#define WMIQ_LEN	16
 #define WMIQ_MAX	2040
 static uint8_t wmiq[WMIQ_LEN][WMIQ_MAX];
 static uint16_t wmiq_len[WMIQ_LEN];
@@ -450,6 +451,13 @@ static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
 	}
 	if (h.eid < EP_MAX)
 		ep[h.eid].rx++;
+	if (getenv("WLAND_PROBE")) {
+		static unsigned n;
+		uint32_t w0 = 0;
+		memcpy(&w0, p, plen >= 4 ? 4 : plen);
+		if (n++ < 80)
+			LOG("htc: rx ce%u eid %u flags %#x len %u trailer %u: %08x", c, h.eid, h.flags, plen, h.trailer, w0);
+	}
 	if (h.eid == 0) {
 		uint16_t msg = 0;
 		if (plen >= 2)
@@ -459,6 +467,7 @@ static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
 			memcpy(&cc, p + 2, 2);
 			memcpy(&cs, p + 4, 2);
 			htc_ready = 1;
+			htc_credits = cc;
 			ep[0].svc = SVC_RSVD_CTRL;
 			ep[0].ul = 0;
 			ep[0].dl = 2;
@@ -479,7 +488,8 @@ static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
 			ep[eid].dl = svc == SVC_WMI_CONTROL ? 2 : 1;
 			ep[eid].up = 1;
 			ep[eid].credit_flow = svc == SVC_WMI_CONTROL;
-			ep[eid].credits = ep[eid].credit_flow ? 1 : 0;
+			/* ath10k_htc_get_credit_allocation: WMI gets all of the target's credits */
+			ep[eid].credits = ep[eid].credit_flow ? (uint8_t)(htc_credits ? htc_credits : 1) : 0;
 			if (svc == SVC_HTT_DATA) {
 				htt_eid = eid;
 				htc_connect(SVC_WMI_CONTROL);
@@ -507,16 +517,26 @@ static void htc_rx(uint32_t c, const uint8_t *d, uint32_t len)
 #define WMI_EV_READY		0x2
 #define WMI_EV_SERVICE_AVAILABLE 0x3
 #define WMI_EV_SCAN		0x3001
+#define WMI_EV_SERVICE_READY_EXT 0x4009
 #define WMI_EV_MGMT_RX		0x7001
 #define WMI_CMD_INIT		0x1
 #define CMD_START_SCAN		0x3001
 #define CMD_SCAN_CHAN_LIST	0x3003
 #define CMD_VDEV_CREATE		0x5001
+#define CMD_PDEV_SET_RD		0x4001
+#define CMD_PDEV_SET_PARAM	0x4003
+#define CMD_PDEV_GET_TEMP	0x4010
+#define TAG_PDEV_GET_TEMP	0x156
+#define PDEV_TX_CHAIN_MASK	1
+#define PDEV_RX_CHAIN_MASK	2
 #define TAG_ARRAY_UINT32	0x10
 #define TAG_ARRAY_BYTE		0x11
 #define TAG_ARRAY_STRUCT	0x12
 #define TAG_ARRAY_FIXED_STRUCT	0x13
 #define TAG_SERVICE_READY	0x20
+#define TAG_HAL_REG_CAPS	0x21
+#define TAG_PDEV_SET_RD		0x51
+#define TAG_PDEV_SET_PARAM	0x52
 #define TAG_HOST_MEM_REQ	0x22
 #define TAG_READY_EVENT		0x23
 #define TAG_SCAN_EVENT		0x24
@@ -544,6 +564,8 @@ struct wmi_mem_req { uint32_t req_id, unit_size, num_unit_info, num_units; };
 static uint32_t wmi_svc_map[32], wmi_svc_ext[4], wmi_nreq;
 static struct wmi_mem_req wmi_req[MAX_MEM_REQS];
 static int wmi_init_sent, wmi_ready, wmi_seen_bmap, wmi_seen_reqs;
+static uint32_t wmi_eeprom_rd, wmi_rf_chains;
+static uint64_t wmi_init_due_ms, scan_due_ms;
 static uint8_t wmi_mac[6];
 
 /* ath10k WMI_SERVICE_IS_ENABLED: 4 service bits per 32-bit word (sizeof(u32)) */
@@ -592,7 +614,11 @@ static void wmi_svc_ready(const uint8_t *p, uint32_t len)
 			memcpy(&fw, v, 4);
 			memcpy(&a0, v + 4, 4);
 			memcpy(&rf, v + 36, 4);
+			wmi_rf_chains = rf;
 			LOG("wmi: fw %08x abi %08x rf chains %u", fw, a0, rf);
+		} else if (tag == TAG_HAL_REG_CAPS && l >= 4) {
+			memcpy(&wmi_eeprom_rd, v, 4);
+			LOG("wmi: eeprom regdomain %#x", wmi_eeprom_rd);
 		} else if (tag == TAG_ARRAY_UINT32 && !wmi_seen_bmap) {
 			wmi_seen_bmap = 1;
 			memcpy(wmi_svc_map, v, MIN((uint32_t)l, (uint32_t)sizeof(wmi_svc_map)));
@@ -764,6 +790,17 @@ static int scan_send_start(void)
 	return wmi_send(CMD_START_SCAN, m, (uint32_t)(p - m));
 }
 
+/* WMI ECHO (ath10k_wmi_barrier): the answer (event 0x1d001, our value) shows the WMI handler got this far */
+#define CMD_ECHO	0x1d001
+#define TAG_ECHO_CMD	0x95
+static void wmi_probe(void)
+{
+	static uint32_t seq;
+	uint8_t t[4 + 4], *c = put_tlv(t, TAG_ECHO_CMD, 4);
+	put32(c, 0xec000000u | ++seq);
+	wmi_send(CMD_ECHO, t, sizeof(t));
+}
+
 static void scan_start(void)
 {
 	static uint8_t m[1536];
@@ -786,7 +823,42 @@ static void scan_start(void)
 		c = put32(c, (40u << 8) | (40u << 16));
 		p = put32(c, 40u << 8);
 	}
+	/*
+	 * ath10k_start before any scan: chain masks for the radio's chains and the
+	 * regulatory domain (ath10k_regd_update; the board's own eeprom value, FCC
+	 * conformance limits). The Pixel 3's WLAN.HL.2.2 accepted the scan without
+	 * them but never started it.
+	 */
+	int probes = getenv("WLAND_PROBE") != NULL;
+	if (probes)
+		wmi_probe();				/* 1: before anything */
+	uint32_t chains = wmi_rf_chains >= 1 && wmi_rf_chains <= 3 ? (1u << wmi_rf_chains) - 1 : 3;
+	for (uint32_t prm = PDEV_TX_CHAIN_MASK; prm <= PDEV_RX_CHAIN_MASK; prm++) {
+		uint8_t sp[4 + 12];
+		c = put_tlv(sp, TAG_PDEV_SET_PARAM, 12);
+		c = put32(c, 0);
+		c = put32(c, prm);
+		put32(c, chains);
+		wmi_send(CMD_PDEV_SET_PARAM, sp, sizeof(sp));
+	}
+	if (probes)
+		wmi_probe();				/* 2: after the chain masks */
+	uint32_t rd = wmi_eeprom_rd & 0xffff;
+	uint8_t rdm[4 + 24];
+	c = put_tlv(rdm, TAG_PDEV_SET_RD, 24);
+	c = put32(c, 0);
+	c = put32(c, rd);
+	c = put32(c, rd);
+	c = put32(c, rd);
+	c = put32(c, 0x10);				/* CTL_FCC */
+	put32(c, 0x10);
+	int r = wmi_send(CMD_PDEV_SET_RD, rdm, sizeof(rdm));
+	if (probes)
+		wmi_probe();				/* 3: after the regdomain */
+	LOG("pdev: chain masks %#x, regdomain %#x -> %d", chains, rd, r);
 	int a = wmi_send(CMD_SCAN_CHAN_LIST, m, (uint32_t)(p - m));
+	if (probes)
+		wmi_probe();				/* 4: after the channel list */
 	uint8_t v[4 + 20] = { 0 };
 	c = put_tlv(v, TAG_VDEV_CREATE_CMD, 20);
 	c = put32(c, 0);				/* vdev 0 */
@@ -794,7 +866,11 @@ static void scan_start(void)
 	c = put32(c, 0);
 	memcpy(c, radio_mac, 6);
 	int b = wmi_send(CMD_VDEV_CREATE, v, sizeof(v));
+	if (probes)
+		wmi_probe();				/* 5: after the vdev */
 	scanning = !scan_send_start();
+	if (probes)
+		wmi_probe();				/* 6: after the scan */
 	LOG("scan: channel list (%u) %s, vdev %s, passive scan %s", NFREQ, a ? "FAILED" : "ok", b ? "FAILED" : "ok",
 	    scanning ? "requested" : "FAILED");
 }
@@ -1005,11 +1081,18 @@ static void htt_publish(void)
 	wr32(htt_idx_pa, htt_alloc);			/* device memory: ordered after the entries */
 }
 
+static void wmi_probe(void);
+
 static void htt_configure(const char *why)
 {
 	uint8_t m[64] = { 0 }, *p = m;
 
 	htt_state = 2;
+	/* WLAND_HTT_SKIP: 1 frag bank, 2 rx ring, 4 aggregation (to find what wedges a firmware) */
+	const char *sk = getenv("WLAND_HTT_SKIP");
+	unsigned skip = sk ? (unsigned)strtoul(sk, NULL, 0) : 0;
+	if (getenv("WLAND_PROBE"))
+		wmi_probe();				/* 0: before the HTT setup */
 	/* ath10k_htt_send_frag_desc_bank_cfg_64 */
 	*p++ = H2T_FRAG_DESC_BANK_CFG;
 	*p++ = 0;
@@ -1023,7 +1106,7 @@ static void htt_configure(const char *why)
 	p += 4 + 2 + 2;
 	*p++ = 1;
 	*p++ = 0;
-	int a = htt_send(m, sizeof(m));
+	int a = (skip & 1) ? -2 : htt_send(m, sizeof(m));
 	/* ath10k_htt_send_rx_ring_cfg_64 */
 	for (uint32_t i = 0; i < HTT_RING_SIZE - 1; i++)
 		htt_post(htt_buf_pa + (uint64_t)i * HTT_BUF_SIZE);
@@ -1049,12 +1132,14 @@ static void htt_configure(const char *why)
 	p = put16(p, OFF_ATTENTION);
 	p = put16(p, OFF_FRAG_INFO);
 	htt_publish();
-	int b = htt_send(r, sizeof(r));
+	int b = (skip & 2) ? -2 : htt_send(r, sizeof(r));
 	uint8_t g[4] = { H2T_AGGR_CFG, 64, 3, 0 };
-	int c = htt_send(g, sizeof(g));
+	int c = (skip & 4) ? -2 : htt_send(g, sizeof(g));
 	LOG("htt (%s): frag bank %s, rx ring cfg %s (%u buffers), aggr cfg %s", why, a ? "FAILED" : "ok",
 	    b ? "FAILED" : "ok", HTT_RING_SIZE - 1, c ? "FAILED" : "ok");
-	scan_start();
+	/* WLAND_SCAN_DELAY ms (default 3000): the Pixel 3's HL.2.2 may still calibrate right after READY */
+	const char *sd = getenv("WLAND_SCAN_DELAY");
+	scan_due_ms = link_ms() + (sd ? strtoul(sd, NULL, 0) : 3000);
 }
 
 static void htt_start(void)
@@ -1936,8 +2021,20 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 	case WMI_EV_SERVICE_READY:
 		LOG("wmi: SERVICE_READY, %u bytes", len);
 		wmi_svc_ready(d + 4, len - 4);
+		/*
+		 * Firmware that also sends SERVICE_READY_EXT (0x4009; the Pixel 3's
+		 * WLAN.HL.2.2) expects INIT after it: sent then, or 500 ms from now
+		 * (radio_poll) if it never comes.
+		 */
 		if (!wmi_init_sent)
+			wmi_init_due_ms = link_ms() + 500;
+		break;
+	case WMI_EV_SERVICE_READY_EXT:
+		LOG("wmi: SERVICE_READY_EXT, %u bytes", len);
+		if (!wmi_init_sent) {
+			wmi_init_due_ms = 0;
 			wmi_send_init();
+		}
 		break;
 	case WMI_EV_READY:
 		for (uint32_t o = 4; o + 4 <= len;) {
@@ -1968,8 +2065,16 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 	case EV_ROAM:
 		sta_wmi_event(id, d + 4, len - 4);
 		break;
-	default:
+	default: {
+		/* firmware differences show up here first (the Pixel 3's WLAN.HL.2.2 never started a scan) */
+		static unsigned other;
+		if (other++ < 40) {
+			uint32_t w[4] = { 0 };
+			memcpy(w, d + 4, len - 4 < sizeof(w) ? len - 4 : sizeof(w));
+			LOG("wmi: event %#x, %u bytes: %08x %08x %08x %08x", id, len, w[0], w[1], w[2], w[3]);
+		}
 		break;
+	}
 	}
 }
 
@@ -1994,6 +2099,14 @@ void radio_poll(void)
 	last = now;
 	ce_poll();
 	now = link_ms();				/* what ce_poll started is stamped after the first now */
+	if (scan_due_ms && now >= scan_due_ms) {
+		scan_due_ms = 0;
+		scan_start();
+	}
+	if (wmi_init_due_ms && now >= wmi_init_due_ms && !wmi_init_sent) {
+		wmi_init_due_ms = 0;
+		wmi_send_init();
+	}
 	if (htt_state == 1 && now > htt_req_ms + 2000) {
 		LOG("htt: no VERSION_CONF in 2 s, configuring anyway");
 		htt_configure("timeout");
@@ -2041,8 +2154,21 @@ unsigned radio_scans(void)
 
 void radio_stats(void)
 {
-	LOG("stats: state %u, tx %u sent %u done %u failed, rx %u to the IP side, htt msdus %u, ce tx full %u/%u/%u",
-	    s_state, tx_sent, tx_done, tx_fail, rx_up, htt_msdus, ce[0].tx_full, ce[3].tx_full, ce[4].tx_full);
+	LOG("stats: state %u, tx %u sent %u done %u failed, rx %u to the IP side, htt msdus %u, ce tx full %u/%u/%u, "
+	    "wmi credits %u queued %u",
+	    s_state, tx_sent, tx_done, tx_fail, rx_up, htt_msdus, ce[0].tx_full, ce[3].tx_full, ce[4].tx_full,
+	    wmi_eid != 0xff ? ep[wmi_eid].credits : 0, wmiq_tail - wmiq_head);
+	if (wmi_ready)
+		wmi_probe();				/* liveness: an ECHO answer shows up as wmi event 0x1d001 */
+	if (ce_up) {
+		uint32_t rri[CE_COUNT];
+		char line[256];
+		int o = 0;
+		mem_rd(rri_pa, rri, sizeof(rri));
+		for (uint32_t c = 0; c < CE_COUNT && o < (int)sizeof(line) - 40; c++)
+			o += snprintf(line + o, sizeof(line) - (size_t)o, " ce%u %x/%u/%u", c, rri[c], ce[c].rx, ce[c].tx);
+		LOG("ce rri/rx/tx:%s", line);
+	}
 }
 
 /* the i-th network heard (any scan): 0, or -1 past the last */

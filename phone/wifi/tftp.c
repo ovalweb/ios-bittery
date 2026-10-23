@@ -15,7 +15,8 @@
 #include "link.h"
 #include "tftp.h"
 
-#define RO_PREFIX	"/readonly/firmware/image/"
+/* /readonly/firmware/image/X (SM8150), /readonly/vendor/firmware/X (SDM845): all from FW_DIR by name */
+#define RO_PREFIX	"/readonly/"
 #define RW_PREFIX	"/readwrite/"
 #define FW_DIR		"/var/local/fw/modem"
 #define RW_DIR		"/var/local/fw/rw"
