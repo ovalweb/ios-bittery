@@ -24,6 +24,15 @@
 #define MDP_PP_OFFSETS		{0x71000, 0x71800, 0x72000, 0x72800}
 /* Refuse to start xnu on RAM the live FDT does not show as free DDR. */
 #define BOARD_STRICT_MEMCHECK	1
+/*
+ * Resets land in fastboot (ios-flame shim): PM8998 PON on SID 0, reason in
+ * SOFT_RB_SPARE [7:1] (Linux qcom-pon gen2, bootloader = 2), PS_HOLD made a
+ * hard reset; the APSS watchdog (qcom,apss-wdt-sdm845) bites a hung kernel,
+ * which pets it while threads run (ADT /sweet-watchdog).
+ */
+#define BOARD_PON_REBOOT	1
+#define WDT_BASE		0x17980000UL
+#define WDT_BITE_S		30
 #else
 /* Xiaomi Redmi Note 10 Pro, SM7150 */
 #define BOARD_NAME		"sweet"

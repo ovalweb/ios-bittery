@@ -15,6 +15,7 @@
 
 /* IMEM_RESTART_REASON and PSHOLD: board.h */
 #define RESTART_BOOTLOADER	0x77665500U
+#include "spmi.h"
 
 #define GICD_BASE		0x17a00000UL
 #define GICR_BASE		0x17a60000UL
@@ -370,6 +371,47 @@ static uint32_t to_us(uint64_t ticks)
 	return ticks * 10 / 192;	/* 19.2 MHz */
 }
 
+#if defined(BOARD_PON_REBOOT)
+/*
+ * From ios-flame shim.c: every later reset (PSCI SYSTEM_RESET, PS_HOLD, a
+ * watchdog bite) boots into fastboot, not the Android boot partition.
+ */
+#define PON_SOFT_RB_SPARE	0x88f		/* PON (SID 0), reason in [7:1] */
+#define PON_REASON_BOOTLOADER	0x02
+#define PON_PS_HOLD_RESET_CTL	0x85a		/* [3:0] type */
+#define PON_PS_HOLD_RESET_CTL2	0x85b		/* [7] enable */
+#define PON_RESET_EN		0x80
+#define PON_HARD_RESET		0x7
+#define WDT_HZ			32765
+
+static void board_reset_to_fastboot(void)
+{
+	uint8_t v = 0xff, ctl = 0xff, ctl2 = 0xff;
+	int rc = spmi_init();
+	if (!rc)
+		rc = spmi_read(0, PON_SOFT_RB_SPARE, &v);
+	if (!rc)
+		rc = spmi_write(0, PON_SOFT_RB_SPARE, (v & 1) | PON_REASON_BOOTLOADER << 1);
+	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+	con_hex2("PON RB", "rc=", (uint32_t)rc, "was=", v);
+	/* Linux qpnp-power-on: disable, wait out 10 sleep-clock cycles, type, enable. */
+	int hr = spmi_read(0, PON_PS_HOLD_RESET_CTL, &ctl) | spmi_read(0, PON_PS_HOLD_RESET_CTL2, &ctl2);
+	if (!hr) {
+		hr |= spmi_write(0, PON_PS_HOLD_RESET_CTL2, ctl2 & ~PON_RESET_EN);
+		delay_ms(1);
+		hr |= spmi_write(0, PON_PS_HOLD_RESET_CTL, (ctl & ~0xf) | PON_HARD_RESET);
+		hr |= spmi_write(0, PON_PS_HOLD_RESET_CTL2, ctl2 | PON_RESET_EN);
+	}
+	con_hex2("PSHOLD", "rc=", (uint32_t)hr, "ctl=", ctl);
+	wr32(WDT_BASE + 0x08, 0);
+	wr32(WDT_BASE + 0x10, (WDT_BITE_S - 2) * WDT_HZ);	/* bark: nobody listens */
+	wr32(WDT_BASE + 0x14, WDT_BITE_S * WDT_HZ);
+	wr32(WDT_BASE + 0x04, 1);
+	wr32(WDT_BASE + 0x08, 1);
+	con_hex2("WDT", "en=", rd32(WDT_BASE + 0x08), "bite s=", WDT_BITE_S);
+}
+#endif
+
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
@@ -385,6 +427,9 @@ void shim_main(uint64_t dtb)
 	con_str("BOARD", BOARD_NAME);
 	display_report();
 	con_skip();
+#if defined(BOARD_PON_REBOOT)
+	board_reset_to_fastboot();
+#endif
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();

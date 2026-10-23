@@ -78,6 +78,8 @@ BLUELINE = dict(
         ]),
         # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
         # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
+        # the shim arms the APSS watchdog (30 s bite); SweetPlatformExpert pets it
+        node('sweet-watchdog', [('reg', u32(0x17980000))]),
         # SweetBattery: PMI8998 fuel gauge and SMB2 charger on SPMI SID 2; 2915 mAh
         node('sweet-battery', [
             ('compatible', cstr('qcom,pmi8998-fg')),

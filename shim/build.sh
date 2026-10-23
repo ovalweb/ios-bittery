@@ -26,9 +26,9 @@ fi
 CC=${CROSS}gcc
 OBJCOPY=${CROSS}objcopy
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BOARD_DEF"
-OBJS="shim console mmu fdt loader ufs display"
+OBJS="shim console mmu fdt loader ufs display spmi"
 mkdir -p out
-for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c display.c; do
+for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c display.c spmi.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
 done
 # The image runs wherever ABL puts it with no relocation pass: only the
