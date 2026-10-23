@@ -1,0 +1,44 @@
+--- a/bsd/vfs/vfs_attrlist.c
++++ b/bsd/vfs/vfs_attrlist.c
+@@ -1052,6 +1052,24 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
+ 				VFSATTR_RETURN(&vs, f_bused, mnt->mnt_vfsstat.f_blocks - vs.f_bfree);
+ 			}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			/*
++			 * iOS asks APFS-only sizes (CoreServices volume capacity keys);
++			 * the HFS+ root has neither, which failed the whole call and left
++			 * URL.volumeTotalCapacity nil (Settings > About crashed). No quota:
++			 * the whole volume; nothing reserved.
++			 */
++			if (VFSATTR_IS_ACTIVE(&vs, f_quota)
++			    && !VFSATTR_IS_SUPPORTED(&vs, f_quota)) {
++				VFSATTR_RETURN(&vs, f_quota, VFSATTR_IS_SUPPORTED(&vs, f_blocks) ?
++				    vs.f_blocks : mnt->mnt_vfsstat.f_blocks);
++			}
++			if (VFSATTR_IS_ACTIVE(&vs, f_reserved)
++			    && !VFSATTR_IS_SUPPORTED(&vs, f_reserved)) {
++				VFSATTR_RETURN(&vs, f_reserved, 0);
++			}
++#endif
++
+ 			/* default value for volume f_attributes */
+ 			if (VFSATTR_IS_ACTIVE(&vs, f_attributes)
+ 			    && !VFSATTR_IS_SUPPORTED(&vs, f_attributes)) {
+@@ -1106,6 +1124,16 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
+ 						getvolattrlist_fixupattrs((attribute_set_t *)&alp->commonattr, &vs);
+ 					}
+ 				} else {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++					static int sweet_volattr_reports;
++					if (sweet_volattr_reports < 16) {
++						sweet_volattr_reports++;
++						printf("SWEET VFS: getattrlist %s on %s: unsupported vfs_attr bits %#llx (vol %#x common %#x)\n",
++						    proc_best_name(vfs_context_proc(ctx)), mnt->mnt_vfsstat.f_fstypename,
++						    (unsigned long long)(vs.f_active & ~vs.f_supported), alp->volattr,
++						    alp->commonattr);
++					}
++#endif
+ 					error = EINVAL;
+ 					goto out;
+ 				}
