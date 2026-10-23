@@ -78,6 +78,12 @@ BLUELINE = dict(
         ]),
         # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
         # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
+        # SweetBattery: PMI8998 fuel gauge and SMB2 charger on SPMI SID 2; 2915 mAh
+        node('sweet-battery', [
+            ('compatible', cstr('qcom,pmi8998-fg')),
+            ('sid', u32(2)),
+            ('design-capacity-mah', u32(2915)),
+        ]),
         # thermal log (bsd/dev/sweet_thermal.c): TSENS TM bases and sensor counts,
         # cpufreq-hw domains (silver, gold), APSS watchdog
         node('sweet-thermal', [
