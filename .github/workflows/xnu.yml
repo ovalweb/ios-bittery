@@ -25,7 +25,8 @@ on:
       - ".github/workflows/xnu.yml"
 
 concurrency:
-  group: xnu-${{ github.ref }}
+  # one group per runner image: builds on several images can race
+  group: xnu-${{ github.ref }}-${{ inputs.runner || 'macos-14' }}
   cancel-in-progress: true
 
 env:
