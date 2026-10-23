@@ -1,0 +1,161 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -74,6 +74,7 @@ static struct {
+ 	uint32_t avdd_mv, addr, max_x, max_y;
+ 	int ic;         /* 0: probe GT9896 / Focaltech (sweet), else TOUCH_STFTS */
+ 	uint32_t gpi_pa, gpi_mask, gpi_seid;    /* GPI DMA engine for a FIFO-less SE */
++	uint32_t smmu_pa, gpi_sid, ref_sid;     /* its SMMU stream; a working master's */
+ } tb = {
+ 	.se_pa = 0x00a84000u,
+ 	.gcc_vote = (0x0fu << 18) | (1u << 23),         /* wrapper1 core/ahb + S1 */
+@@ -210,6 +211,17 @@ static struct {
+ #define GPI_TCE_EOT     2u          /* transfer completion codes (dword 2 bits 31:24) */
+ #define GPI_TCE_ERR     16u
+ #define GPI_ST_NACK     (1u << 6)   /* completion status: GP_IRQ1 << 5 */
++/* ARM MMU-500 global space 0 (apps SMMU); Linux arm-smmu.h */
++#define SMMU_SCR0       0x000u      /* bit 10 USFCFG: unmatched streams fault */
++#define SMMU_IDR0       0x020u      /* bits 7:0 NUMSMRG */
++#define SMMU_IDR1       0x024u      /* bit 31: 64 KiB pages (global space 1 at 64 KiB) */
++#define SMMU_GFSR       0x048u      /* bit 1 USF: unidentified stream fault */
++#define SMMU_GFSYNR0    0x050u
++#define SMMU_GFSYNR1    0x054u      /* bits 15:0 stream ID of the fault */
++#define SMMU_SMR(i)     (0x800u + 4u * (i))     /* bit 31 valid, 30:16 mask, 14:0 ID */
++#define SMMU_S2CR(i)    (0xc00u + 4u * (i))     /* 17:16 type (0 CB, 1 bypass, 2 fault), 7:0 CB */
++#define SMMU_CBAR(i)    (4u * (i))              /* in global space 1 */
++#define SMMU_SMR_VALID  (1u << 31)
+ 
+ static struct {
+ 	vm_offset_t se, gcc;
+@@ -220,7 +232,7 @@ static struct {
+ 	unsigned clk_level;     /* DFS performance level of the 19.2 MHz SE clock */
+ 	int x[TOUCH_MAX], y[TOUCH_MAX];
+ 	/* GPI DMA: register block, GPII, one page of rings and bounce buffers */
+-	vm_offset_t gpi, dma;
++	vm_offset_t gpi, dma, smmu;
+ 	uint64_t dma_pa;
+ 	unsigned gpii, ch_wp[2], ev_rp, gpi_reports;
+ 	bool gpi_cfg;           /* CONFIG0 TRE sent since the last channel start */
+@@ -359,6 +371,17 @@ touch_board(void)
+ 		printf("SWEET TOUCH: gpi-reg needs gpi-gpii-mask (13 GPIIs) and gpi-seid (0-7)\n");
+ 		ok = false;
+ 	}
++	/* optional: <SMMU base, GPI stream ID, stream ID of a master ABL left working> */
++	uint32_t smmu[3];
++	unsigned ns = sweet_board_u32s("/sweet-touch", "gpi-smmu", smmu, 3);
++	if (ns == 3 && smmu[1] < 0x8000u && smmu[2] < 0x8000u) {
++		tb.smmu_pa = smmu[0];
++		tb.gpi_sid = smmu[1];
++		tb.ref_sid = smmu[2];
++	} else if (ns) {
++		printf("SWEET TOUCH: gpi-smmu needs <base gpi-sid ref-sid> (15-bit IDs)\n");
++		ok = false;
++	}
+ 	if (!ok || !tb.sda.tile || !tb.scl.tile || !tb.reset.tile || tb.addr > 0x7f ||
+ 	    tb.max_x == 0 || tb.max_x > 4095 || tb.max_y == 0 || tb.max_y > 4095 ||
+ 	    tb.gcc_vote == 0 || tb.rcg >= 0x60000u) {
+@@ -748,6 +771,7 @@ touch_gpi_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ 		/* NACKs are expected while the IC boots: report the first few only */
+ 		if (st.probing || st.gpi_reports < 4 || (err != ENXIO && st.gpi_reports < 16)) {
+ 			st.gpi_reports++;
++			uint32_t g = GPI_GPII(st.gpii);
+ 			printf("SWEET TOUCH: gpi %s addr=%#x len=%u err=%d ev=%08x %08x %08x %08x "
+ 			    "ch=%u/%u rp=%#x/%#x evrp=%#x log=%#x\n", nr ? "read" : "write", addr,
+ 			    nr ? nr : nt, err, st.ev_last[0], st.ev_last[1], st.ev_last[2], st.ev_last[3],
+@@ -755,7 +779,15 @@ touch_gpi_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ 			    touch_rd(st.gpi, GPI_CH(st.gpii, 0) + GPI_CTX_RP_LO),
+ 			    touch_rd(st.gpi, GPI_CH(st.gpii, 1) + GPI_CTX_RP_LO),
+ 			    touch_rd(st.gpi, GPI_EV(st.gpii) + GPI_CTX_RP_LO),
+-			    touch_rd(st.gpi, GPI_GPII(st.gpii) + GPI_ERROR_LOG));
++			    touch_rd(st.gpi, g + GPI_ERROR_LOG));
++			printf("SWEET TOUCH: gpi cntxt0 ch=%#x/%#x ev=%#x irq type=%#x ch=%#x ev=%#x glob=%#x gpii=%#x smmu gfsr=%#x synr=%#x/%#x\n",
++			    touch_rd(st.gpi, GPI_CH(st.gpii, 0)), touch_rd(st.gpi, GPI_CH(st.gpii, 1)),
++			    touch_rd(st.gpi, GPI_EV(st.gpii)), touch_rd(st.gpi, g + 0x080u),
++			    touch_rd(st.gpi, g + GPI_CH_IRQ), touch_rd(st.gpi, g + GPI_EV_IRQ),
++			    touch_rd(st.gpi, g + GPI_GLOB_STTS), touch_rd(st.gpi, g + GPI_GPII_STTS),
++			    st.smmu ? touch_rd(st.smmu, SMMU_GFSR) : 0u,
++			    st.smmu ? touch_rd(st.smmu, SMMU_GFSYNR0) : 0u,
++			    st.smmu ? touch_rd(st.smmu, SMMU_GFSYNR1) : 0u);
+ 		}
+ 		(void)touch_gpi_restart();
+ 		return err;
+@@ -767,6 +799,70 @@ touch_gpi_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ 	return 0;
+ }
+ 
++static int
++touch_smmu_match(unsigned nsmr, uint32_t sid)
++{
++	for (unsigned i = 0; i < nsmr; ++i) {
++		uint32_t smr = touch_rd(st.smmu, SMMU_SMR(i));
++		uint32_t mask = (smr >> 16) & 0x7fffu;
++		if ((smr & SMMU_SMR_VALID) && !((sid ^ smr) & ~mask & 0x7fffu)) {
++			return (int)i;
++		}
++	}
++	return -1;
++}
++
++/*
++ * SDM845's hypervisor faults DMA from apps SMMU streams that have no stream
++ * mapping; Linux arm-smmu-qcom.c keeps the ones ABL left. ABL never used the
++ * GPI master, so give its stream a free SMR whose S2CR copies the one of a
++ * master ABL left working (UFS). sweettouchsmmu=0 only reports.
++ */
++static void
++touch_gpi_smmu(void)
++{
++	int enable = 1;
++	(void)PE_parse_boot_argn("sweettouchsmmu", &enable, sizeof(enable));
++	st.smmu = ml_io_map(tb.smmu_pa, 0x20000);
++	if (!st.smmu) {
++		printf("SWEET TOUCH: smmu %#x mapping failed\n", tb.smmu_pa);
++		return;
++	}
++	uint32_t scr0 = touch_rd(st.smmu, SMMU_SCR0), idr0 = touch_rd(st.smmu, SMMU_IDR0);
++	uint32_t gr1 = (touch_rd(st.smmu, SMMU_IDR1) & (1u << 31)) ? 0x10000u : 0x1000u;
++	unsigned nsmr = idr0 & 0xffu;
++	printf("SWEET TOUCH: smmu %#x scr0=%#x idr0=%#x (%u SMRs) gfsr=%#x synr1=%#x\n",
++	    tb.smmu_pa, scr0, idr0, nsmr, touch_rd(st.smmu, SMMU_GFSR),
++	    touch_rd(st.smmu, SMMU_GFSYNR1));
++	int free_smr = -1;
++	for (unsigned i = 0; i < nsmr; ++i) {
++		uint32_t smr = touch_rd(st.smmu, SMMU_SMR(i));
++		if (!(smr & SMMU_SMR_VALID)) {
++			if (free_smr < 0) {
++				free_smr = (int)i;
++			}
++			continue;
++		}
++		uint32_t s2cr = touch_rd(st.smmu, SMMU_S2CR(i));
++		printf("SWEET TOUCH: smmu smr%u id=%#x mask=%#x s2cr=%#x cbar=%#x\n", i,
++		    smr & 0x7fffu, (smr >> 16) & 0x7fffu, s2cr, ((s2cr >> 16) & 3u) ? 0u :
++		    touch_rd(st.smmu, gr1 + SMMU_CBAR(s2cr & 0xffu)));
++	}
++	int gm = touch_smmu_match(nsmr, tb.gpi_sid), rm = touch_smmu_match(nsmr, tb.ref_sid);
++	printf("SWEET TOUCH: smmu stream %#x -> smr %d, reference %#x -> smr %d, first free %d\n",
++	    tb.gpi_sid, gm, tb.ref_sid, rm, free_smr);
++	if (gm >= 0 || rm < 0 || free_smr < 0 || !enable) {
++		return;
++	}
++	touch_wait(1500);       /* the lines above reach the disk if the writes below are fatal */
++	uint32_t s2cr = touch_rd(st.smmu, SMMU_S2CR((unsigned)rm));
++	touch_wr(st.smmu, SMMU_S2CR((unsigned)free_smr), s2cr);
++	touch_wr(st.smmu, SMMU_SMR((unsigned)free_smr), SMMU_SMR_VALID | tb.gpi_sid);
++	printf("SWEET TOUCH: smmu smr%d now %#x s2cr %#x (copied %#x from smr%d)\n", free_smr,
++	    touch_rd(st.smmu, SMMU_SMR((unsigned)free_smr)),
++	    touch_rd(st.smmu, SMMU_S2CR((unsigned)free_smr)), s2cr, rm);
++}
++
+ /*
+  * The SE in GSI mode (Linux geni_se_select_gpi_mode), then one free GPII of
+  * the board's mask: event ring, both channels allocated and started
+@@ -775,6 +871,9 @@ touch_gpi_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ static bool
+ touch_gpi_init(void)
+ {
++	if (tb.smmu_pa) {
++		touch_gpi_smmu();
++	}
+ 	st.gpi = ml_io_map(tb.gpi_pa, GPI_SIZE);
+ 	if (!st.gpi) {
+ 		printf("SWEET TOUCH: gpi %#x mapping failed\n", tb.gpi_pa);

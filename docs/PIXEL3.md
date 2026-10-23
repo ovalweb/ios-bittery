@@ -64,6 +64,7 @@ Sources: Google's `android-msm-crosshatch-4.9` kernel (`arch/arm64/boot/dts/qcom
 | `xnu/patches/0083` | `bsd/dev/sweet_board.c`: optional ADT values. Keys (`/sweet-keys`), RPMh RSC base (`/sweet-rpmh`, LDO allowlist `ldoc11`, `ldoa19`), USB clock status registers (`/sweet-usb`) |
 | `xnu/patches/0084` | Touch: GENI SE, GCC votes, per-pin TLMM tiles, AVDD from `/sweet-touch`; ST FTM5 protocol (FIFO command `0x86`, 8-byte events, sense on `A0 00 FF`); TX up to 8 bytes |
 | `xnu/patches/0086` | Touch I2C over GPI DMA when the SE has no FIFO (ADT `gpi-reg`, `gpi-gpii-mask`, `gpi-seid`): polled GPII (event ring + TX/RX channels in one DMA page), CONFIG0/GO/DMA TREs as in the downstream GSI I2C driver, stop/reset/start after an error |
+| `xnu/patches/0087` | GPI stream mapping: dumps the apps SMMU stream table; when `gpi_dma0`'s stream (`0x16`) has no SMR, gives it a free one with UFS's S2CR (ADT `gpi-smmu`; `sweettouchsmmu=0` only reports) |
 | `xnu/patches/0085` | `SweetDisplay.h`: one geometry for framebuffer and touch. New **fit** mode scales the 1125x2436 iPhone X screen to 997x2160 (nearest neighbour) instead of cutting 138 rows top and bottom (status bar, home indicator). Auto when cropping loses >4% of the height; `sweetfb_fit=0/1` forces it |
 | `tools/mkadt.py --board blueline` | Memory, framebuffer, CPUs (`qcom,kryo385` + `qcom,kryo470` so `SweetCPU` still matches), ECID, and the four board nodes |
 | `shim/board.h`, `BOARD=blueline shim/build.sh` | Framebuffer, IMEM; `display.c` turns on MDP autorefresh before drawing; `loader.c` checks the kernel RAM against the live FDT `/memory` and `/reserved-memory` and refuses to jump on blueline if it is not free DDR |
@@ -239,9 +240,9 @@ Ordered by how likely they are to stop the boot.
    set to the AP; the IC firmware is not updated. The SE2 must have ABL/TZ
    loaded GENI I2C firmware (`proto=3` in the log). Polling at 100 kHz.
    Its FIFO is fused off, so every transfer is GPI DMA (0086). The GPI
-   master (SMMU stream `0x16`) reaches DDR only if the SMMU passes it
-   through as it does UFS; a `gpi ... err=60` timeout with the event RP
-   unchanged points there.
+   master (SMMU stream `0x16`) reaches DDR only with a stream mapping.
+   First boot (0086 alone): channel 0 went to ERROR on its first TRE
+   (`log=0x4006010`), nothing consumed, no events; 0087 maps the stream.
 6. **USB** (`sweetusb=1/2`): same controller addresses as sweet; untested.
 7. **Battery**: keep the default static 100 %; `sweetbattery=1` reads
    PM6150 fuel-gauge registers and is wrong on PM8998/PMI8998.
