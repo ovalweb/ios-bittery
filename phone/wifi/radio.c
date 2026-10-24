@@ -566,6 +566,10 @@ static struct wmi_mem_req wmi_req[MAX_MEM_REQS];
 static int wmi_init_sent, wmi_ready, wmi_seen_bmap, wmi_seen_reqs;
 static uint32_t wmi_eeprom_rd, wmi_rf_chains;
 static uint64_t wmi_init_due_ms, scan_due_ms;
+/* SERVICE_READY_EXT (fw-api wmi_unified.h): the hardware modes; -1 = none reported */
+static int32_t wmi_hw_mode = -1;
+static int hw_mode_state;		/* 0 not asked, 1 asked, 2 answered */
+#define WMI_EV_SET_HW_MODE_RESP	0x4010
 static uint8_t wmi_mac[6];
 
 /* ath10k WMI_SERVICE_IS_ENABLED: 4 service bits per 32-bit word (sizeof(u32)) */
@@ -719,6 +723,19 @@ static void wmi_send_init(void)
 		put32(c, wmi_svc(SVC_EXTEND_ADDRESS) ? (uint32_t)(cpa >> 32) : 0);
 		p += 20;
 	}
+	/*
+	 * qcacld send_init_cmd_tlv: firmware that lists hardware modes (SERVICE_READY_EXT) takes
+	 * the mode in INIT (wmi_pdev_set_hw_mode_cmd_fixed_param + band_to_mac array).
+	 */
+	if (wmi_hw_mode >= 0 && !getenv("WLAND_NO_HWMODE")) {
+		uint8_t *c = put_tlv(p, 0x203, 12);
+		c = put32(c, 0);			/* pdev_id: the SoC */
+		c = put32(c, (uint32_t)wmi_hw_mode);
+		c = put32(c, 0);			/* num_band_to_mac */
+		p = put_tlv(c, TAG_ARRAY_STRUCT, 0);
+		hw_mode_state = 2;			/* no separate PDEV_SET_HW_MODE */
+		LOG("wmi: INIT carries hw mode %d", wmi_hw_mode);
+	}
 	wmi_init_sent = !wmi_send(WMI_CMD_INIT, m, (uint32_t)(p - m));
 	LOG("wmi: INIT (%u chunks, %u bytes host memory) %s", n, total, wmi_init_sent ? "sent" : "FAILED");
 }
@@ -762,7 +779,7 @@ static int scan_send_start(void)
 	c = put32(c, 0xa000 | 1);			/* scan_req_id */
 	c = put32(c, 0);				/* vdev */
 	c = put32(c, 1);				/* priority low */
-	c = put32(c, 0x001 | 0x002 | 0x004 | 0x008 | 0x100 | 0x010);	/* events */
+	c = put32(c, 0x001 | 0x002 | 0x004 | 0x008 | 0x100 | 0x010 | 0x020 | 0x040 | 0x080);	/* events */
 	c = put32(c, 50);				/* dwell active */
 	c = put32(c, 150);				/* dwell passive */
 	c = put32(c, 50);				/* min rest */
@@ -808,6 +825,20 @@ static void scan_start(void)
 
 	if (scan_started)
 		return;
+	/* qcacld (wma_send_pdev_set_hw_mode_cmd): pick a hardware mode first; the rest follows its answer */
+	if (wmi_hw_mode >= 0 && !getenv("WLAND_NO_HWMODE") && hw_mode_state != 2) {
+		if (hw_mode_state == 0) {
+			uint8_t hm[4 + 12 + 4];
+			c = put_tlv(hm, 0x203, 12);
+			c = put32(c, 0);		/* pdev_id: the SoC */
+			c = put32(c, (uint32_t)wmi_hw_mode);
+			c = put32(c, 0);		/* num_band_to_mac */
+			put_tlv(c, TAG_ARRAY_STRUCT, 0);
+			hw_mode_state = 1;
+			LOG("pdev: set hw mode %d -> %d", wmi_hw_mode, wmi_send(0x401e, hm, sizeof(hm)));
+		}
+		return;
+	}
 	scan_started = 1;
 	/* channel list, every channel passive: nothing is transmitted */
 	p = put32(put_tlv(p, TAG_SCAN_CHAN_LIST_CMD, 4), NFREQ);
@@ -859,18 +890,50 @@ static void scan_start(void)
 	int a = wmi_send(CMD_SCAN_CHAN_LIST, m, (uint32_t)(p - m));
 	if (probes)
 		wmi_probe();				/* 4: after the channel list */
-	uint8_t v[4 + 20] = { 0 };
-	c = put_tlv(v, TAG_VDEV_CREATE_CMD, 20);
+	/*
+	 * qcacld's form (send_vdev_create_cmd_tlv): num_cfg_txrx_streams and pdev_id after the
+	 * MAC, then one wmi_vdev_txrx_streams (0x19b) per band. ath10k sends only the first 20
+	 * bytes; WLAND_VDEV_SHORT=1 does the same.
+	 */
+	uint8_t v[4 + 28 + 4 + 2 * 16] = { 0 };
+	int vshort = getenv("WLAND_VDEV_SHORT") != NULL;
+	uint32_t streams = wmi_rf_chains >= 1 && wmi_rf_chains <= 2 ? wmi_rf_chains : 1;
+	c = put_tlv(v, TAG_VDEV_CREATE_CMD, vshort ? 20 : 28);
 	c = put32(c, 0);				/* vdev 0 */
 	c = put32(c, 2);				/* station */
 	c = put32(c, 0);
 	memcpy(c, radio_mac, 6);
-	int b = wmi_send(CMD_VDEV_CREATE, v, sizeof(v));
+	c += 8;
+	uint32_t vlen = 4 + 20;
+	if (!vshort) {
+		c = put32(c, 2);			/* num_cfg_txrx_streams */
+		c = put32(c, 0);			/* pdev_id */
+		c = put_tlv(c, TAG_ARRAY_STRUCT, 2 * 16);
+		for (uint32_t band = 0; band < 2; band++) {	/* WMI_TPC_CHAINMASK_CONFIG_BAND_2G, _5G */
+			c = put_tlv(c, 0x19b, 12);
+			c = put32(c, band);
+			c = put32(c, streams);
+			c = put32(c, streams);
+		}
+		vlen = (uint32_t)(c - v);
+	}
+	int b = wmi_send(CMD_VDEV_CREATE, v, vlen);
 	if (probes)
 		wmi_probe();				/* 5: after the vdev */
 	scanning = !scan_send_start();
 	if (probes)
 		wmi_probe();				/* 6: after the scan */
+	if (probes) {
+		/* REQUEST_STATS for vdev 0: the answer (event 0x16001) counts the vdevs that exist */
+		uint8_t rs[4 + 20] = { 0 };
+		c = put_tlv(rs, 0x8f, 20);
+		c = put32(c, 0x8);			/* WMI_REQUEST_VDEV_STAT */
+		put32(c, 0);				/* vdev 0; peer MAC, pdev 0 */
+		wmi_send(0x16001, rs, sizeof(rs));
+		rs[8] = 0x1;				/* WMI_REQUEST_PEER_STAT ... use PDEV: 0x4 */
+		rs[8] = 0x4;
+		wmi_send(0x16001, rs, sizeof(rs));
+	}
 	LOG("scan: channel list (%u) %s, vdev %s, passive scan %s", NFREQ, a ? "FAILED" : "ok", b ? "FAILED" : "ok",
 	    scanning ? "requested" : "FAILED");
 }
@@ -879,12 +942,18 @@ static void scan_event(const uint8_t *t, uint32_t len)
 {
 	uint16_t tag;
 	uint32_t e[6];
-	if (len < 4 + sizeof(e))
+	if (len < 4 + sizeof(e)) {
+		LOG("scan: short event, %u bytes", len);
 		return;
+	}
 	memcpy(&tag, t + 2, 2);
-	if (tag != TAG_SCAN_EVENT)
+	if (tag != TAG_SCAN_EVENT) {
+		LOG("scan: event with tag %#x, %u bytes", tag, len);
 		return;
+	}
 	memcpy(e, t + 4, sizeof(e));
+	if (e[0] & 0xe0)				/* preempted, start failed, restarted */
+		LOG("scan: event %#x reason %u freq %u scan id %#x vdev %u", e[0], e[1], e[2], e[4], e[5]);
 	if (e[0] == 0x008 || e[0] == 0x100 || e[0] == 0x004)
 		return;					/* foreign channel / exit / bss channel */
 	if (e[0] == 0x001)
@@ -2031,6 +2100,38 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 		break;
 	case WMI_EV_SERVICE_READY_EXT:
 		LOG("wmi: SERVICE_READY_EXT, %u bytes", len);
+		/* TLVs: WMI_SOC_MAC_PHY_HW_MODE_CAPS (0x212) {num_hw_modes, ...}, then an array of
+		 * WMI_HW_MODE_CAPABILITIES (0x211) {hw_mode_id, phy_id_map, hw_mode_config_type} */
+		for (uint32_t o = 4; o + 4 <= len;) {
+			uint16_t l, tag;
+			memcpy(&l, d + o, 2);
+			memcpy(&tag, d + o + 2, 2);
+			if (o + 4 + l > len)
+				break;
+			if (tag == 0x212 && l >= 8) {
+				uint32_t nm, nc;
+				memcpy(&nm, d + o + 4, 4);
+				memcpy(&nc, d + o + 8, 4);
+				LOG("wmi: %u hw modes, %u chainmask tables", nm, nc);
+			} else if (tag == TAG_ARRAY_STRUCT) {
+				for (uint32_t e = o + 4; e + 4 <= o + 4 + l;) {
+					uint16_t el, et;
+					memcpy(&el, d + e, 2);
+					memcpy(&et, d + e + 2, 2);
+					if (et == 0x211 && el >= 12) {
+						uint32_t id, map, type;
+						memcpy(&id, d + e + 4, 4);
+						memcpy(&map, d + e + 8, 4);
+						memcpy(&type, d + e + 12, 4);
+						LOG("wmi: hw mode %u: phy map %#x, type %u", id, map, type);
+						if (wmi_hw_mode < 0 || type == 0)	/* prefer a single-MAC mode */
+							wmi_hw_mode = (int32_t)id;
+					}
+					e += 4 + el;
+				}
+			}
+			o += 4 + l;
+		}
 		if (!wmi_init_sent) {
 			wmi_init_due_ms = 0;
 			wmi_send_init();
@@ -2057,6 +2158,15 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 	case WMI_EV_SCAN:
 		scan_event(d + 4, len - 4);
 		break;
+	case WMI_EV_SET_HW_MODE_RESP: {
+		uint32_t st = 0xffffffff;
+		if (len >= 12)
+			memcpy(&st, d + 8, 4);
+		LOG("pdev: hw mode set, status %u", st);
+		hw_mode_state = 2;
+		scan_start();
+		break;
+	}
 	case WMI_EV_MGMT_RX:
 		scan_mgmt_rx(d + 4, len - 4);
 		break;
@@ -2072,6 +2182,13 @@ static void wmi_rx(const uint8_t *d, uint32_t len)
 			uint32_t w[4] = { 0 };
 			memcpy(w, d + 4, len - 4 < sizeof(w) ? len - 4 : sizeof(w));
 			LOG("wmi: event %#x, %u bytes: %08x %08x %08x %08x", id, len, w[0], w[1], w[2], w[3]);
+			if (getenv("WLAND_PROBE") && id == 0x3a001) {	/* regulatory channel list: the whole event */
+				for (uint32_t o = 4; o + 16 <= len; o += 16) {
+					uint32_t x[4];
+					memcpy(x, d + o, 16);
+					LOG("wmi:   +%3u %08x %08x %08x %08x", o - 4, x[0], x[1], x[2], x[3]);
+				}
+			}
 		}
 		break;
 	}
