@@ -14,6 +14,8 @@
 #   DTB     the stock DTB (default dtb/boot_unpacked/dtb from the phone's boot.img)
 #   KERNEL  xnu/out/kernel.development.sweet (CI artifact)
 #   ADT     shim/out/blueline.adt, made here with tools/mkadt.py --board blueline --highmem
+#   GPUFW   Adreno 630 firmware (a630_gmu.bin, a630_sqe.fw, a630_zap.mdt/.b02 from the
+#           vendor image; never in the repository), default ../research/fw/gpu when present
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,6 +25,7 @@ extra="$*"
 DTB=${DTB:-dtb/boot_unpacked/dtb}
 KERNEL=${KERNEL:-xnu/out/kernel.development.sweet}
 ADT=${ADT:-shim/out/blueline.adt}
+GPUFW=${GPUFW:-../research/fw/gpu}
 
 base='debug=0xc serial=3 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 wdt=-1'
 case $stage in
@@ -43,7 +46,10 @@ else
 	python3 tools/mkadt.py "$ADT" --board blueline --highmem
 	args="$args${extra:+ $extra}"
 	[ ${#args} -lt 608 ] || { echo "boot-args too long (${#args} of 607)" >&2; exit 1; }
-	python3 tools/mkpayload.py "$KERNEL" "$ADT" shim/out/payload-blueline.bin --cmdline "$args" >/dev/null
+	fwarg=()
+	[ -f "$GPUFW/a630_gmu.bin" ] && fwarg=(--gpufw "$GPUFW")
+	python3 tools/mkpayload.py "$KERNEL" "$ADT" shim/out/payload-blueline.bin --cmdline "$args" ${fwarg[@]+"${fwarg[@]}"} |
+		grep '^gpufw' || true
 	BOARD=blueline DTB="$DTB" shim/build.sh "$(pwd)/shim/out/payload-blueline.bin"
 	echo "boot-args: $args"
 fi

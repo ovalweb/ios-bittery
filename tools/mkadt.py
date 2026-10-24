@@ -95,6 +95,9 @@ BLUELINE = dict(
         ]),
         # ST FTM5 (st,fts) at 0x49 on QUP wrapper0 SE2 (i2c@888000).
         # Pins: <tile pin function pull drive>, pull 0 none / 3 up, drive (mA/2 - 1).
+        # Adreno 630 (bsd/dev/sweet_gpu.c, sweet_a6xx.c): the SoC table entry; frames stay on the
+        # CPU path ("present" 0) until the MDP pipes ABL uses here are known.
+        node('sweet-gpu', [('gpu-id', u32(630)), ('present', u32(0))]),
         node('sweet-touch', [
             ('compatible', cstr('st,fts')),
             ('reg', u32(0x49)),

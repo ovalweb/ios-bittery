@@ -1,0 +1,787 @@
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -1,8 +1,10 @@
+ /*
+- * Adreno 640 core (see sweet_a6xx.h). The bring-up follows shim/gpuprobe.c,
+- * which first worked on the phone; that file has the reasoning behind each
+- * register value (offsets from mainline a6xx_gmu.c/a6xx_gpu.c, a6xx.xml,
+- * gpucc-sm8150.c, sm8150.dtsi).
++ * Adreno 6xx core (see sweet_a6xx.h). The A640 bring-up follows
++ * shim/gpuprobe.c, which first worked on the Pixel 4; that file has the
++ * reasoning behind each register value (offsets from mainline
++ * a6xx_gmu.c/a6xx_gpu.c, a6xx.xml, gpucc-sm8150.c, sm8150.dtsi). The A630
++ * paths (Pixel 3) follow the same mainline files for "legacy" GMUs and
++ * sdm845.dtsi / Google's qcom_sdm845-v2.dtsi.
+  */
+ #if !defined(KERNEL) || defined(ARM64_BOARD_CONFIG_SWEET)
+ #ifdef KERNEL
+@@ -17,6 +19,59 @@
+ #define rd32		a6_rd
+ #define wr32		a6_wr
+ 
++/* RPMh ARC levels */
++#define LVL_MIN_SVS	48
++#define LVL_LOW_SVS	64
++#define LVL_SVS		128
++#define LVL_SVS_L1	192
++#define LVL_SVS_L2	224
++#define LVL_NOM		256
++#define LVL_NOM_L1	320
++#define LVL_TURBO	384
++#define LVL_TURBO_L1	416
++
++static const struct a6_soc soc_a640 = {
++	.name = "sm8150 A640", .gpu_id = 640, .chip_id = 0x06040001,
++	.gpu_base = 0x02c00000, .gpucc = 0x02c90000, .smmu = 0x02ca0000,
++	.pdc = 0x0b290000, .pdc_seq = 0x0b490000, .pdc_vote_addr = 0x30090,
++	.gcc_axi = 0x71154,
++	.fb_pa = 0x9c400000, .zap_region = 0x9a915000,
++	.legacy = false,
++	.gmu_fw = "a640_gmu.bin", .zap_mdt = "a640_zap.mdt", .zap_b02 = "a640_zap.b02",
++	.nlvl = 6,
++	.khz = { 0, 257000, 345000, 427000, 499200, 585000 },
++	.lvl = { 0, LVL_LOW_SVS, LVL_SVS, LVL_SVS_L1, LVL_SVS_L2, LVL_NOM },
++	.gmu_khz = 200000, .gmu_lvl = LVL_MIN_SVS,
++};
++
++/* Pixel 3: qcom,chipid 0x06030001, qcom,gpu-pwrlevels 257-710 MHz, GMU 200 MHz */
++static const struct a6_soc soc_a630 = {
++	.name = "sdm845 A630", .gpu_id = 630, .chip_id = 0x06030001,
++	.gpu_base = 0x05000000, .gpucc = 0x05090000, .smmu = 0x05040000,
++	.pdc = 0x0b280000, .pdc_seq = 0x0b480000, .pdc_vote_addr = 0x30080,
++	.gcc_axi = 0x44038,
++	.fb_pa = 0x9d400000, .zap_region = 0x8c415000,
++	.legacy = true,
++	.gmu_fw = "a630_gmu.bin", .zap_mdt = "a630_zap.mdt", .zap_b02 = "a630_zap.b02",
++	.nlvl = 8,
++	.khz = { 0, 257000, 342000, 414000, 520000, 596000, 675000, 710000 },
++	.lvl = { 0, LVL_LOW_SVS, LVL_SVS, LVL_SVS_L1, LVL_NOM, LVL_NOM_L1, LVL_TURBO, LVL_TURBO_L1 },
++	.gmu_khz = 200000, .gmu_lvl = LVL_MIN_SVS,
++};
++
++const struct a6_soc *a6_soc = &soc_a640;
++
++int a6_soc_select(uint32_t gpu_id)
++{
++	if (gpu_id == 630)
++		a6_soc = &soc_a630;
++	else if (gpu_id == 640)
++		a6_soc = &soc_a640;
++	else
++		return -1;
++	return 0;
++}
++
+ static void wr64(uint64_t pa, uint64_t v)
+ {
+ 	wr32(pa, (uint32_t)v);
+@@ -104,6 +159,7 @@ static void zero_pa(uint64_t pa, uint64_t size)
+ #define GMEM_DUMMY(g)	a6_pool_pa(g, 0x90000)
+ #define GMEM_LOG(g)	a6_pool_pa(g, A6_GMEM_LOG_OFF)
+ #define GMEM_HFI(g)	a6_pool_pa(g, 0x95000)
++#define GMEM_DEBUG(g)	a6_pool_pa(g, 0x99000)	/* legacy GMU (A630): HFI v1 GMU_INIT debug buffer, 16 KB */
+ 
+ #define VA_ICACHE	0x4000u
+ #define VA_DCACHE	0x44000u
+@@ -111,12 +167,13 @@ static void zero_pa(uint64_t pa, uint64_t size)
+ #define VA_DUMMY	0x60000000u
+ #define VA_LOG		A6_GMU_LOG_VA
+ #define VA_HFI		0x60005000u
++#define VA_DEBUG	0x60009000u
+ 
+-#define RSCC		(0x02c6a000ull + 0x23000)
++#define RSCC		(A6_GPU_BASE + 0x6a000 + 0x23000)	/* GMU + 0x23000 */
+ #define RSCC_REG(o)	(RSCC + 4ull * (o))
+-#define PDC		0x0b290000ull
++#define PDC		(a6_soc->pdc)
+ #define PDC_REG(o)	(PDC + 4ull * (o))
+-#define PDC_SEQ		0x0b490000ull
++#define PDC_SEQ		(a6_soc->pdc_seq)
+ 
+ #define GMU_SYSRESET	0x1f800
+ #define GMU_BOOT_CFG	0x1f801
+@@ -138,6 +195,23 @@ static void zero_pa(uint64_t pa, uint64_t size)
+ #define GMU_G2H_CLR	0x1f991
+ #define GMU_G2H_INFO	0x1f992
+ #define GMU_H2G_SET	0x1f994
++#define GMU_HFI_CTRL_INIT 0x1f986
++#define GMU_SPTPRAC_CTRL 0x1a881	/* GMU_GX_SPTPRAC_POWER_CONTROL */
++#define GMU_SPTPRAC_STATUS 0x1f8d0	/* GMU_SPTPRAC_PWR_CLK_STATUS */
++#define GMU_SLUMBER_OPT	0x1cbf8		/* GMU_BOOT_SLUMBER_OPTION */
++#define GMU_GX_VOTE_IDX	0x1cbf9
++#define GMU_MX_VOTE_IDX	0x1cbfa
++#define GMU_DCVS_ACK	0x1cbfc
++#define GMU_DCVS_PERF	0x1cbfd
++#define GMU_DCVS_BW	0x1cbfe
++#define GMU_DCVS_RET	0x1cbff
++/* OOB request / ack bits (a6xx_gmu_oob_bits): legacy GMU, then the A640's */
++#define OOB_GPU_SET	(a6_soc->legacy ? 16 : 30)
++#define OOB_GPU_ACK	(a6_soc->legacy ? 24 : 31)
++#define OOB_SLUMBER_SET	22
++#define OOB_SLUMBER_ACK	30
++#define OOB_DCVS_SET	23
++#define OOB_DCVS_ACK	31
+ 
+ #define RBBM_STATUS		0x210
+ #define RBBM_INT_STATUS		0x201
+@@ -198,7 +272,7 @@ static int power_cx(void)
+ 	       rd32(GPUCC + GPUCC_GMU_RCG + 4), rd32(GPUCC + GPUCC_AHB), rd32(GPUCC + GPUCC_CXO),
+ 	       rd32(GPUCC + GPUCC_CX_GMU));
+ 	branch_on("gcc gpu_cfg_ahb", GCC + 0x71004);
+-	branch_on("gcc ddrss_gpu_axi", GCC + 0x71154);
++	branch_on("gcc ddrss_gpu_axi", GCC + a6_soc->gcc_axi);
+ 	branch_on("gcc gpu_memnoc_gfx", GCC + 0x7100c);
+ 	branch_on("gcc gpu_snoc_dvm_gfx", GCC + 0x71018);
+ 
+@@ -333,11 +407,12 @@ static int gmu_smmu(struct a6_gpu *g)
+ 	map_gmu_pages(GMEM_L3_6(g), VA_DUMMY, GMEM_DUMMY(g), 0x1000, 0);
+ 	map_gmu_pages(GMEM_L3_6(g), VA_LOG, GMEM_LOG(g), A6_GMU_LOG_SIZE, 0);
+ 	map_gmu_pages(GMEM_L3_6(g), VA_HFI, GMEM_HFI(g), 0x4000, 0);
++	map_gmu_pages(GMEM_L3_6(g), VA_DEBUG, GMEM_DEBUG(g), 0x4000, 0);
+ 	smmu_bank(g->gmu_smr, g->gmu_cb, GMEM_L1(g), GMU_SID, GMU_SID_MASK);
+ 	return 0;
+ }
+ 
+-/* a6xx_gmu_rpmh_init for the A640 (pdc_address_offset 0x30090). */
++/* a6xx_gmu_rpmh_init (pdc_address_offset: 0x30090 A640, 0x30080 A630). */
+ static void rpmh_init(void)
+ {
+ 	static const uint32_t rscc[][2] = {
+@@ -350,10 +425,10 @@ static void rpmh_init(void)
+ 	static const uint32_t pdc[][2] = {
+ 		{ 0x1573, 7 }, { 0x1574, 0 }, { 0x1572, 0 }, { 0x1575, 0x10108 }, { 0x1576, 0x30010 },
+ 		{ 0x1577, 1 }, { 0x1579, 0x10108 }, { 0x157a, 0x30000 }, { 0x157b, 0 }, { 0x157d, 0x10108 },
+-		{ 0x157e, 0x30090 }, { 0x157f, 0 },
++		{ 0x157e, 0 /* pdc_vote_addr */ }, { 0x157f, 0 },
+ 		{ 0x15d7, 7 }, { 0x15d8, 0 }, { 0x15d6, 0 }, { 0x15d9, 0x10108 }, { 0x15da, 0x30010 },
+ 		{ 0x15db, 2 }, { 0x15dd, 0x10108 }, { 0x15de, 0x30000 }, { 0x15df, 3 }, { 0x15e1, 0x10108 },
+-		{ 0x15e2, 0x30090 }, { 0x15e3, 3 },
++		{ 0x15e2, 0 /* pdc_vote_addr */ }, { 0x15e3, 3 },
+ 		{ 0x1148, 0 }, { 0x1140, 0x80000001 },
+ 	};
+ 	for (unsigned i = 0; i < sizeof(rscc) / sizeof(rscc[0]); i++)
+@@ -361,7 +436,7 @@ static void rpmh_init(void)
+ 	for (unsigned i = 0; i < sizeof(seq) / sizeof(seq[0]); i++)
+ 		wr32(PDC_SEQ + 4 * i, seq[i]);
+ 	for (unsigned i = 0; i < sizeof(pdc) / sizeof(pdc[0]); i++)
+-		wr32(PDC_REG(pdc[i][0]), pdc[i][1]);
++		wr32(PDC_REG(pdc[i][0]), (pdc[i][0] == 0x157e || pdc[i][0] == 0x15e2) ? a6_soc->pdc_vote_addr : pdc[i][1]);
+ }
+ 
+ static void hfi_table(struct a6_gpu *g)
+@@ -371,13 +446,14 @@ static void hfi_table(struct a6_gpu *g)
+ 	wr32(t + 4, 6 * 4 + 3 * 12 * 4);
+ 	wr32(t + 8, 6);
+ 	wr32(t + 12, 12);
+-	wr32(t + 16, 3);
+-	wr32(t + 20, 3);
+-	for (uint32_t q = 0; q < 3; q++) {
++	uint32_t nq = a6_soc->legacy ? 2 : 3;	/* a6xx_hfi_init: command, response (id 4 on legacy), debug */
++	wr32(t + 16, nq);
++	wr32(t + 20, nq);
++	for (uint32_t q = 0; q < nq; q++) {
+ 		uint64_t h = t + 24 + 48 * q;
+ 		wr32(h + 0, 1);
+ 		wr32(h + 4, VA_HFI + 0x1000 * (q + 1));
+-		wr32(h + 8, (10u << 8) | q);
++		wr32(h + 8, (10u << 8) | (a6_soc->legacy && q == 1 ? 4 : q));
+ 		wr32(h + 12, 0x1000 >> 2);
+ 		wr32(h + 24, 1);
+ 		wr32(h + 28, 1);
+@@ -388,9 +464,17 @@ static void hfi_table(struct a6_gpu *g)
+ static int fw_load(struct a6_gpu *g)
+ {
+ 	uint32_t len;
+-	const uint8_t *fw = a6_firmware("a640_gmu.bin", &len);
++	const uint8_t *fw = a6_firmware(a6_soc->gmu_fw, &len);
+ 	if (!fw)
+ 		return -1;
++	if (a6_soc->legacy) {			/* a6xx_gmu_fw_load: the whole file into the ITCM */
++		if (len > 0x8000) {
++			a6_log("gmu fw: %u bytes, more than the 32 KB ITCM\n", len);
++			return -1;
++		}
++		a6_write(GMU_REG(GMU_ITCM), fw, (len + 3) & ~3u);
++		return 1;
++	}
+ 	const uint8_t *p = fw, *end = fw + len;
+ 	int n = 0;
+ 	while (p + 16 <= end) {
+@@ -418,9 +502,56 @@ static int fw_load(struct a6_gpu *g)
+ 	return n;
+ }
+ 
++static uint32_t gx_votes[A6_MAX_LVL], cx_votes[2];
++static int arc_votes(uint32_t *votes, const uint32_t *lvl, int n, const char *pri_id, const char *sec_id);
++
++static int gmu_votes(void)
++{
++	static const uint32_t cx_lvl[2] = { 0, LVL_MIN_SVS };
++	if (arc_votes(gx_votes, a6_soc->lvl, (int)a6_soc->nlvl, "gfx.lvl", "mx.lvl") ||
++	    arc_votes(cx_votes, cx_lvl, 2, "cx.lvl", "mx.lvl")) {
++		a6_log("gmu: cmd-db levels not found\n");
++		return -1;
++	}
++	return 0;
++}
++
++/* Set an OOB request and wait for its ack (a6xx_gmu_set_oob); the ack is cleared either way. */
++static int gmu_oob(unsigned set, unsigned ack, const char *what)
++{
++	wr32(GMU_REG(GMU_H2G_SET), 1u << set);
++	int rc = wait_bit(GMU_REG(GMU_G2H_INFO), 1u << ack, 1, 1000);
++	wr32(GMU_REG(GMU_G2H_CLR), 1u << ack);
++	a6_log("oob %s %s (g2h info %x)\n", what, rc ? "TIMEOUT" : "acked", rd32(GMU_REG(GMU_G2H_INFO)));
++	return rc;
++}
++
++/*
++ * Legacy GMU (A630) after CM3 boot (a6xx_gmu_fw_start): announce the boot with the highest GX/MX
++ * vote (a6xx_gmu_gfx_rail_on), hand SPTPRAC to the CPU (a6xx_sptprac_enable), start the HFI queues.
++ */
++static int gmu_legacy_start(void)
++{
++	uint32_t vote = gx_votes[a6_soc->nlvl - 1];
++	wr32(GMU_REG(GMU_SLUMBER_OPT), 0);
++	wr32(GMU_REG(GMU_GX_VOTE_IDX), vote & 0xff);
++	wr32(GMU_REG(GMU_MX_VOTE_IDX), (vote >> 8) & 0xff);
++	if (gmu_oob(OOB_SLUMBER_SET, OOB_SLUMBER_ACK, "boot_slumber"))
++		return -1;
++	wr32(GMU_REG(GMU_SPTPRAC_CTRL), 0x778000);
++	int rc = wait_bit(GMU_REG(GMU_SPTPRAC_STATUS), 0x38, 1, 10);	/* (status & 0x38) == 0x28 */
++	a6_log("gmu: sptprac %x%s\n", rd32(GMU_REG(GMU_SPTPRAC_STATUS)),
++	       (rd32(GMU_REG(GMU_SPTPRAC_STATUS)) & 0x38) == 0x28 ? " on" : " NOT on");
++	(void)rc;
++	wr32(GMU_REG(GMU_HFI_CTRL_INIT), 1);
++	rc = wait_bit(GMU_REG(GMU_HFI_CTRL), 1, 1, 100);
++	a6_log("gmu: hfi queues %s (status %x)\n", rc ? "NOT started" : "started", rd32(GMU_REG(GMU_HFI_CTRL)));
++	return rc;
++}
++
+ static int gmu_boot(struct a6_gpu *g)
+ {
+-	if (gmu_smmu(g))
++	if (gmu_smmu(g) || gmu_votes())
+ 		return -1;
+ 	rpmh_init();
+ 	hfi_table(g);
+@@ -442,9 +573,12 @@ static int gmu_boot(struct a6_gpu *g)
+ 	wr32(GMU_REG(GMU_QTBL_INFO), 1);
+ 	wr32(GMU_REG(GMU_FENCE0), (1u << 31) | (0xau << 18) | 0xa0);
+ 	wr32(GMU_REG(GMU_CM3_CFG), 0x4052);
+-	wr32(GMU_REG(GMU_SFR_ADDR), 0x06040100);
+-	for (uint32_t i = 0; i < 4; i++)
+-		wr32(GPU + 4 * (0x3c03 + i), 0x00071620);
++	/* the GMU's chip id layout: core/major as is, minor and patch in 4 bits each (a6xx_gmu_fw_start) */
++	uint32_t cid = a6_soc->chip_id;
++	wr32(GMU_REG(GMU_SFR_ADDR), (cid & 0xffff0000) | ((cid << 4) & 0xf000) | ((cid << 8) & 0x0f00));
++	if (!a6_soc->legacy)			/* GBIF QSB sides (A640); the A630 has a VBIF */
++		for (uint32_t i = 0; i < 4; i++)
++			wr32(GPU + 4 * (0x3c03 + i), 0x00071620);
+ 	wr32(GMU_REG(GMU_CP_MSG), VA_LOG | (A6_GMU_LOG_SIZE / 0x1000 - 1));
+ 	wr32(GMU_REG(GMU_SYS_BUS), 1);
+ 	wr32(GMU_REG(GMU_ICACHE_CFG), 1);
+@@ -468,7 +602,9 @@ static int gmu_boot(struct a6_gpu *g)
+ 			a6_delay_ms(1);
+ 	}
+ 	a6_log("gmu: init result %x %s, hfi_ctrl %x\n", r, ok ? "BOOTED" : "timeout", rd32(GMU_REG(GMU_HFI_CTRL)));
+-	return ok ? 0 : -1;
++	if (!ok)
++		return -1;
++	return a6_soc->legacy ? gmu_legacy_start() : 0;
+ }
+ 
+ /* ---- stage 3: HFI, GX power ---- */
+@@ -479,17 +615,6 @@ static int gmu_boot(struct a6_gpu *g)
+ #define QDATA(g, q)	(GMEM_HFI(g) + 0x1000 * ((q) + 1))
+ #define QSIZE		1024
+ 
+-#define LVL_MIN_SVS	48
+-#define LVL_LOW_SVS	64
+-#define LVL_SVS		128
+-#define LVL_SVS_L1	192
+-#define LVL_SVS_L2	224
+-#define LVL_NOM		256
+-
+-static const uint32_t gpu_khz[] = { 0, 257000, 345000, 427000, 499200, 585000 };
+-static const uint32_t gpu_lvl[] = { 0, LVL_LOW_SVS, LVL_SVS, LVL_SVS_L1, LVL_SVS_L2, LVL_NOM };
+-static const uint32_t gmu_khz[] = { 0, 200000 };
+-static const uint32_t gmu_lvl[] = { 0, LVL_MIN_SVS };
+ 
+ static int cmddb_aux(const char *id, uint64_t *aux, uint32_t *len)
+ {
+@@ -563,7 +688,7 @@ static int hfi_send(struct a6_gpu *g, uint32_t id, uint32_t *msg, uint32_t dword
+ 		wr32(QDATA(g, HFI_Q_CMD) + 4 * w, msg[i]);
+ 		w = (w + 1) % QSIZE;
+ 	}
+-	for (; w % 4; w = (w + 1) % QSIZE)
++	for (; !a6_soc->legacy && w % 4; w = (w + 1) % QSIZE)
+ 		wr32(QDATA(g, HFI_Q_CMD) + 4 * w, 0xfafafafa);
+ 	wr32(h + 44, w);
+ 	wr32(GMU_REG(GMU_H2G_SET), 1);
+@@ -579,7 +704,8 @@ static int hfi_send(struct a6_gpu *g, uint32_t id, uint32_t *msg, uint32_t dword
+ 					buf[i] = rd32(QDATA(g, HFI_Q_RESP) + 4 * r);
+ 					r = (r + 1) % QSIZE;
+ 				}
+-				r = ((r + 3) & ~3u) % QSIZE;
++				if (!a6_soc->legacy)
++					r = ((r + 3) & ~3u) % QSIZE;
+ 				wr32(rh + 40, r);
+ 				if ((hdr & 0xff) != 100 && (buf[1] >> 20) == seq)
+ 					return (int)buf[2];
+@@ -591,63 +717,113 @@ static int hfi_send(struct a6_gpu *g, uint32_t id, uint32_t *msg, uint32_t dword
+ 	return -1;
+ }
+ 
++/* Legacy GPU frequency change (a6xx_gmu_set_freq): DCVS registers plus the DCVS OOB. */
++static int gmu_legacy_dcvs(uint32_t lvl)
++{
++	wr32(GMU_REG(GMU_DCVS_ACK), 0);
++	wr32(GMU_REG(GMU_DCVS_PERF), (3u << 28) | lvl);
++	wr32(GMU_REG(GMU_DCVS_BW), 0xff);	/* the firmware picks the bus vote */
++	int rc = gmu_oob(OOB_DCVS_SET, OOB_DCVS_ACK, "dcvs");
++	wr32(GMU_REG(GMU_H2G_SET), 1u << OOB_DCVS_ACK);	/* clear (a6xx_gmu_clear_oob) */
++	uint32_t ret = rd32(GMU_REG(GMU_DCVS_RET));
++	return rc || ret ? -1 : 0;
++}
++
+ static int gmu_hfi(struct a6_gpu *g)
+ {
+ 	static uint32_t msg[256];
+-	uint32_t gx[6], cx[2];
+-	if (arc_votes(gx, gpu_lvl, 6, "gfx.lvl", "mx.lvl") || arc_votes(cx, gmu_lvl, 2, "cx.lvl", "mx.lvl")) {
+-		a6_log("hfi: cmd-db levels not found\n");
+-		return -1;
+-	}
+-	memset(msg, 0, sizeof(msg));
+-	msg[1] = 6;
+-	msg[2] = 2;
+-	for (int i = 0; i < 6; i++) {
+-		msg[3 + 3 * i] = gx[i];
+-		msg[4 + 3 * i] = 0xffffffff;
+-		msg[5 + 3 * i] = gpu_khz[i];
+-	}
+-	for (int i = 0; i < 2; i++) {
+-		msg[3 + 48 + 2 * i] = cx[i];
+-		msg[4 + 48 + 2 * i] = gmu_khz[i];
++	const struct a6_soc *sc = a6_soc;
++	uint32_t n = sc->nlvl, lvl = g->perf_level >= 1 && g->perf_level < n ? g->perf_level : 1;
++	int rc = 0;
++
++	if (sc->legacy) {
++		/* a6xx_hfi_start_v1: GMU init, firmware version, perf table v1, bandwidth table, test */
++		memset(msg, 0, sizeof(msg));
++		msg[2] = VA_DEBUG;
++		msg[3] = 0x4000;
++		msg[4] = 1;			/* GMU_COLD_BOOT */
++		rc |= hfi_send(g, 0, msg, 5);
++		memset(msg, 0, sizeof(msg));
++		msg[1] = (1u << 28) | (1u << 19) | (1u << 17);	/* supported: 1.10 */
++		rc |= hfi_send(g, 1, msg, 2);
++		memset(msg, 0, sizeof(msg));
++		msg[1] = n;
++		msg[2] = 2;
++		for (uint32_t i = 0; i < n; i++) {
++			msg[3 + 2 * i] = gx_votes[i];
++			msg[4 + 2 * i] = sc->khz[i];
++		}
++		for (uint32_t i = 0; i < 2; i++) {
++			msg[3 + 32 + 2 * i] = cx_votes[i];
++			msg[4 + 32 + 2 * i] = i ? sc->gmu_khz : 0;
++		}
++		rc |= hfi_send(g, 4, msg, 3 + 32 + 8);
++		/* a6xx_build_bw_table: one "off" level (the 630 GMU does no bus scaling), fixed CNOC votes */
++		memset(msg, 0, sizeof(msg));
++		static const uint32_t bw630[][2] = {
++			{ 1, 1 }, { 2, 3 }, { 3, 3 }, { 4, 5 }, { 5, 7 }, { 6, 0x50034 }, { 7, 0x5007c }, { 8, 0x5004c },
++			{ 12, 0x40000000 }, { 13, 0 }, { 14, 0x40000000 }, { 18, 0x60000001 }, { 19, 0x20000001 },
++			{ 20, 0x60000001 }, { 24, 0x50000 }, { 25, 0x5005c }, { 26, 0x5000c }, { 32, 0x40000000 },
++			{ 33, 0x40000000 }, { 34, 0x40000000 },
++		};
++		for (unsigned i = 0; i < sizeof(bw630) / sizeof(bw630[0]); i++)
++			msg[bw630[i][0]] = bw630[i][1];
++		rc |= hfi_send(g, 3, msg, 32 + 128);
++		memset(msg, 0, sizeof(msg));
++		rc |= hfi_send(g, 5, msg, 1);	/* test: no more HFI until the next boot */
++		a6_log("hfi v1: init, version, perf (%u levels), bw, test -> %d\n", n, rc);
++		if (rc)
++			return -1;
++	} else {
++		memset(msg, 0, sizeof(msg));
++		msg[1] = n;
++		msg[2] = 2;
++		for (uint32_t i = 0; i < n; i++) {
++			msg[3 + 3 * i] = gx_votes[i];
++			msg[4 + 3 * i] = 0xffffffff;
++			msg[5 + 3 * i] = sc->khz[i];
++		}
++		for (uint32_t i = 0; i < 2; i++) {
++			msg[3 + 48 + 2 * i] = cx_votes[i];
++			msg[4 + 48 + 2 * i] = i ? sc->gmu_khz : 0;
++		}
++		rc = hfi_send(g, 4, msg, 3 + 48 + 8);
++
++		memset(msg, 0, sizeof(msg));
++		static const uint32_t bw[][2] = {
++			{ 1, 1 }, { 2, 3 }, { 3, 3 }, { 4, 1 }, { 5, 1 }, { 6, 0x50034 }, { 7, 0x5007c }, { 8, 0x5004c },
++			{ 12, 0x40000000 }, { 14, 0x40000000 }, { 18, 0x60000001 }, { 19, 0x20000001 }, { 20, 0x60000001 },
++			{ 24, 0x50000 }, { 25, 0x5003c }, { 26, 0x5000c }, { 32, 0x40000000 }, { 33, 0x40000000 },
++			{ 34, 0x40000000 },
++		};
++		for (unsigned i = 0; i < sizeof(bw) / sizeof(bw[0]); i++)
++			msg[bw[i][0]] = bw[i][1];
++		rc |= hfi_send(g, 3, msg, 32 + 128);
++		msg[1] = 0;
++		rc |= hfi_send(g, 14, msg, 2);
++		rc |= hfi_send(g, 10, msg, 1);
++		msg[1] = 1;
++		msg[2] = lvl;			/* index into the perf table */
++		msg[3] = 0;
++		rc |= hfi_send(g, 30, msg, 4);
++		a6_log("hfi: perf/bw tables, core fw start, start, perf vote %u MHz -> %d\n", sc->khz[lvl] / 1000, rc);
+ 	}
+-	int rc = hfi_send(g, 4, msg, 3 + 48 + 8);
+-
+-	memset(msg, 0, sizeof(msg));
+-	static const uint32_t bw[][2] = {
+-		{ 1, 1 }, { 2, 3 }, { 3, 3 }, { 4, 1 }, { 5, 1 }, { 6, 0x50034 }, { 7, 0x5007c }, { 8, 0x5004c },
+-		{ 12, 0x40000000 }, { 14, 0x40000000 }, { 18, 0x60000001 }, { 19, 0x20000001 }, { 20, 0x60000001 },
+-		{ 24, 0x50000 }, { 25, 0x5003c }, { 26, 0x5000c }, { 32, 0x40000000 }, { 33, 0x40000000 },
+-		{ 34, 0x40000000 },
+-	};
+-	for (unsigned i = 0; i < sizeof(bw) / sizeof(bw[0]); i++)
+-		msg[bw[i][0]] = bw[i][1];
+-	rc |= hfi_send(g, 3, msg, 32 + 128);
+-	msg[1] = 0;
+-	rc |= hfi_send(g, 14, msg, 2);
+-	rc |= hfi_send(g, 10, msg, 1);
+-	uint32_t lvl = g->perf_level >= 1 && g->perf_level <= 5 ? g->perf_level : 1;
+-	msg[1] = 1;
+-	msg[2] = lvl;			/* index into gpu_khz */
+-	msg[3] = 0;
+-	rc |= hfi_send(g, 30, msg, 4);
+-	a6_log("hfi: perf/bw tables, core fw start, start, perf vote %u MHz -> %d\n", gpu_khz[lvl] / 1000, rc);
+-
+-	wr32(GMU_REG(GMU_H2G_SET), 1u << 30);	/* OOB GPU_SET */
+-	int ack = wait_bit(GMU_REG(GMU_G2H_INFO), 1u << 31, 1, 1000);
+-	wr32(GMU_REG(GMU_G2H_CLR), 1u << 31);
+-	a6_log("oob gpu_set %s, gx gdsc %x\n", ack ? "TIMEOUT" : "acked", rd32(GPUCC + GPUCC_GX_GDSCR));
++
++	(void)gmu_oob(OOB_GPU_SET, OOB_GPU_ACK, "gpu_set");
++	a6_log("gx gdsc %x\n", rd32(GPUCC + GPUCC_GX_GDSCR));
+ 	if (!a6_gx_up()) {
+ 		a6_log("GX not powered; not touching GPU registers\n");
+ 		return -1;
+ 	}
++	if (sc->legacy)
++		a6_log("dcvs: %u MHz -> %d\n", sc->khz[lvl] / 1000, gmu_legacy_dcvs(lvl));
+ 	return 0;
+ }
+ 
+ /* ---- zap shader through TrustZone PAS ---- */
+ 
+ #define PAS_GPU		13
+-#define ZAP_REGION	0x9a915000ull	/* reserved-memory pil_gpu_region */
++#define ZAP_REGION	(a6_soc->zap_region)	/* reserved-memory pil_gpu_region / gpu_mem */
+ #define ZAP_SIZE	0x2000u
+ #define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
+ 
+@@ -664,7 +840,7 @@ static int zap_load(struct a6_gpu *g)
+ {
+ 	uint64_t r1 = 0;
+ 	uint32_t mlen, slen;
+-	const uint8_t *mdt = a6_firmware("a640_zap.mdt", &mlen), *b02 = a6_firmware("a640_zap.b02", &slen);
++	const uint8_t *mdt = a6_firmware(a6_soc->zap_mdt, &mlen), *b02 = a6_firmware(a6_soc->zap_b02, &slen);
+ 	if (!mdt || !b02 || slen > ZAP_SIZE)
+ 		return -1;
+ 	a6_write(a6_pool_pa(g, A6_OFF_ZAP_META), mdt, mlen);
+@@ -1001,35 +1177,49 @@ int a6_recover(struct a6_gpu *g)
+ 
+ static int gpu_cp_init(struct a6_gpu *g, bool resume)
+ {
+-	/* a6xx hw_init for the A640 (a6xx_gpu.c), minus clock gating, CP protection and interrupts */
+-	wr32(GREG(0x3c45), 0);			/* GBIF_HALT */
+-	(void)rd32(GREG(0x3c45));
+-	wr32(GREG(0x16), 0);			/* RBBM_GBIF_HALT */
+-	(void)rd32(GREG(0x16));
++	/* a6xx hw_init (a6xx_gpu.c), minus clock gating, CP protection and interrupts */
++	bool vbif = a6_soc->legacy;		/* A630: VBIF; A640: GBIF */
++	if (!vbif) {
++		wr32(GREG(0x3c45), 0);		/* GBIF_HALT */
++		(void)rd32(GREG(0x3c45));
++		wr32(GREG(0x16), 0);		/* RBBM_GBIF_HALT */
++		(void)rd32(GREG(0x16));
++	}
+ 	static const uint32_t init[][2] = {
+ 		{ 0xf803, 0 }, { 0xf800, 0 }, { 0xf801, 0 }, { 0xf802, 0 },	/* SECVID TSB */
+ 		/* 64-bit addressing: CP VSC GRAS RB PC HLSQ VFD VPC UCHE SP TPL1 SECVID */
+ 		{ 0x0842, 1 }, { 0x0c01, 1 }, { 0x8601, 1 }, { 0x8e05, 1 }, { 0x9e01, 1 }, { 0xbe05, 1 },
+ 		{ 0xa601, 1 }, { 0x9601, 1 }, { 0x0e00, 1 }, { 0xae01, 1 }, { 0xb601, 1 }, { 0xf810, 1 },
+-		{ 0x0011, 3 },				/* RBBM_GBIF_CLIENT_QOS_CNTL */
++		{ 0, 0 },				/* QoS: below, per bus interface */
+ 		{ 0x050b, 0xffffffff },			/* RBBM_PERFCTR_GPU_BUSY_MASKED */
+ 		/* UCHE: write range max, trap base, write-through base (trap 0x1fffffffff000) */
+ 		{ 0x0e05, 0xffffffc0 }, { 0x0e06, 0x1ffff }, { 0x0e09, 0xfffff000 }, { 0x0e0a, 0x1ffff },
+ 		{ 0x0e07, 0xfffff000 }, { 0x0e08, 0x1ffff },
+ 		{ 0x0e0b, 0x100000 }, { 0x0e0c, 0 }, { 0x0e0d, 0x1fffff }, { 0x0e0e, 0 },	/* GMEM range */
+ 		{ 0x0e18, 0x804 }, { 0x0e17, 0x4 },	/* UCHE_FILTER_CNTL, CACHE_WAYS */
+-		{ 0x08c2, 0x02000140 }, { 0x08c1, 0x8040362c }, { 0x08c3, 128 },	/* ROQ, mem pool */
++		{ 0x08c2, 0 }, { 0x08c1, 0x8040362c }, { 0x08c3, 128 },	/* ROQ (THRESHOLDS_2 below), mem pool */
+ 		{ 0x098d, 1 }, { 0x0500, 1 },		/* CP_AHB_CNTL, RBBM_PERFCTR_CNTL */
+ 		{ 0x001f, (1u << 30) | 0x1fffff },	/* RBBM_INTERFACE_HANG_INT_CNTL */
+ 		{ 0x0e19, (1u << 7) | 1 },		/* UCHE_CLIENT_PF */
+ 		{ 0x9e00, 0x00180000 },			/* PC_DBG_ECO_CNTL: prim_fifo_threshold */
+ 		{ 0x08d0, 0 },				/* CP_PERFCTR_CP_SEL[0]: always count */
+ 		/* a6xx_set_ubwc_config: highest bank bit 15 (hbb_lo 2), AMSBC, UBWC 3 */
+-		{ 0x8e08, (1u << 4) | (2u << 1) }, { 0xb604, 2u << 1 }, { 0xae02, 2u << 1 },
++		{ 0x8e08, 0 /* below */ }, { 0xb604, 2u << 1 }, { 0xae02, 2u << 1 },
+ 		{ 0x0e01, 2u << 21 }, { 0x0534, 0 },
+ 	};
+ 	for (unsigned i = 0; i < sizeof(init) / sizeof(init[0]); i++)
+-		wr32(GREG(init[i][0]), init[i][1]);
++		if (init[i][0])
++			wr32(GREG(init[i][0]), init[i][1]);
++	if (vbif) {
++		wr32(GREG(0x0010), 3);			/* RBBM_VBIF_CLIENT_QOS_CNTL */
++		wr32(GREG(0x302a), 9);			/* VBIF_GATE_OFF_WRREQ_EN (A630) */
++		wr32(GREG(0x08c2), 0x010000c0);		/* CP_ROQ_THRESHOLDS_2 */
++		wr32(GREG(0x8e08), 2u << 1);		/* RB_NC_MODE_CNTL: hbb_lo 2, no AMSBC */
++	} else {
++		wr32(GREG(0x0011), 3);			/* RBBM_GBIF_CLIENT_QOS_CNTL */
++		wr32(GREG(0x08c2), 0x02000140);
++		wr32(GREG(0x8e08), (1u << 4) | (2u << 1));	/* AMSBC on the A640 */
++	}
+ 
+ 	uint32_t len;
+ 	const uint8_t *sqe = a6_firmware("a630_sqe.fw", &len);
+--- a/bsd/dev/sweet_a6xx.h
++++ b/bsd/dev/sweet_a6xx.h
+@@ -1,5 +1,6 @@
+ /*
+- * Adreno 640 core shared by the kernel (bsd/dev/sweet_gpu.c) and the
++ * Adreno 6xx core (the A640 of the Pixel 4's SM8150; the A630 of the Pixel 3's
++ * SDM845, picked with a6_soc_select) shared by the kernel (bsd/dev/sweet_gpu.c) and the
+  * userland bring-up tool (phone/gpu/gpu.c, built from this same file): power
+  * and GMU boot, HFI, SMMU banks, SQE + CP + zap shader, ringbuffer
+  * submission, 4K page mappings, and the 2D blit stream.
+@@ -48,11 +49,35 @@
+ #define A6_RING_SIZE		0x8000u
+ #define A6_RING_DW		(A6_RING_SIZE / 4)
+ 
+-#define A6_FB_PA		0x9c400000ull
+ #define A6_FB_SIZE		0xa00000ull	/* mapped for the GPU: 5 x 2 MB */
+ 
+-#define A6_GPU_ID		640
+-#define A6_CHIP_ID		0x06040001ull
++/*
++ * What differs between the two GPUs. The A630 has the first-generation GMU
++ * (Linux: gmu->legacy): its firmware is one raw ITCM image, it speaks HFI v1,
++ * takes OOB requests on the old interrupt bits and leaves SPTPRAC to the CPU;
++ * its bus interface is the VBIF, not the GBIF.
++ */
++#define A6_MAX_LVL		8
++struct a6_soc {
++	const char *name;
++	uint32_t gpu_id, chip_id;
++	uint64_t gpu_base, gpucc, smmu, pdc, pdc_seq;
++	uint32_t pdc_vote_addr;		/* RPMh address in the PDC's TCS commands */
++	uint32_t gcc_axi;		/* GCC_DDRSS_GPU_AXI_CBCR */
++	uint64_t fb_pa;			/* the panel framebuffer ABL left running */
++	uint64_t zap_region;		/* reserved-memory for the zap shader (TrustZone PAS 13) */
++	bool legacy;
++	const char *gmu_fw, *zap_mdt, *zap_b02;
++	uint32_t nlvl;			/* GPU perf levels, entry 0 = off */
++	uint32_t khz[A6_MAX_LVL], lvl[A6_MAX_LVL];
++	uint32_t gmu_khz, gmu_lvl;	/* the GMU's one non-off level */
++};
++extern const struct a6_soc *a6_soc;
++int a6_soc_select(uint32_t gpu_id);	/* 630 or 640 (the default); 0 = ok */
++
++#define A6_FB_PA		(a6_soc->fb_pa)
++#define A6_GPU_ID		(a6_soc->gpu_id)
++#define A6_CHIP_ID		((uint64_t)a6_soc->chip_id)
+ 
+ struct a6_gpu {
+ 	uint64_t pool_pa;
+@@ -61,7 +86,7 @@ struct a6_gpu {
+ 	uint32_t fence;			/* last fence value submitted */
+ 	uint32_t hfi_seq;
+ 	uint32_t pt_next;		/* next free table in the arena */
+-	uint32_t perf_level;		/* GMU perf vote: 1 (257 MHz) .. 5 (585 MHz); 0 = 1 */
++	uint32_t perf_level;		/* GMU perf vote: 1 (257 MHz) .. a6_soc->nlvl - 1; 0 = 1 */
+ };
+ 
+ /* ---- environment ---- */
+@@ -157,10 +182,10 @@ uint32_t a6_blit_ib(const struct a6_gpu *g, const struct a6_blit *b, uint32_t *d
+ #define A6_CP_MEMCPY		0x75
+ 
+ /* Register/state access for status and dumps */
+-#define A6_GPU_BASE		0x02c00000ull
++#define A6_GPU_BASE		(a6_soc->gpu_base)
+ #define A6_GREG(o)		(A6_GPU_BASE + 4ull * (o))
+-#define A6_GPUCC		0x02c90000ull
+-#define A6_SMMU			0x02ca0000ull
++#define A6_GPUCC		(a6_soc->gpucc)
++#define A6_SMMU			(a6_soc->smmu)
+ #define A6_SMMU_CB(n)		(A6_SMMU + 0x8000 + 0x1000ull * (n))
+ #define A6_FSR_FAULT		0xc00001feu
+ #define A6_GMEM_LOG_OFF		0x91000ull
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -31,6 +31,7 @@
+ #include <libkern/libkern.h>
+ #include <mach/mach_time.h>
+ #include "sweet_a6xx.h"
++#include "sweet_board.h"
+ #include "../../iokit/Kernel/arm/SweetDisplayMask.h"
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+@@ -270,11 +271,46 @@ gpu_thread(void *arg __unused, wait_result_t wr __unused)
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++/*
++ * Which A6xx: ADT /sweet-gpu "gpu-id" (630 on the Pixel 3; no node = flame's 640), chosen before
++ * anything else so SweetAccelerator reports it even with the GPU off. "present" 0 keeps frames on
++ * the CPU path until the board's display pipes are known (boot-arg sweetgpupresent overrides).
++ */
++static uint32_t present_ok = 1;
++
++uint32_t
++sweet_gpu_id(void)
++{
++	return A6_GPU_ID;
++}
++
++uint32_t
++sweet_gpu_chip_id(void)
++{
++	return (uint32_t)A6_CHIP_ID;
++}
++
++bool
++sweet_gpu_present_enabled(void)
++{
++	return present_ok != 0;
++}
++
+ void
+ sweet_gpu_init(void)
+ {
++	uint32_t id = 640;
++	(void)sweet_board_u32("/sweet-gpu", "gpu-id", &id);
++	if (a6_soc_select(id)) {
++		a6_log("unknown gpu-id %u in /sweet-gpu; GPU off\n", id);
++		return;
++	}
++	(void)sweet_board_u32("/sweet-gpu", "present", &present_ok);
++	PE_parse_boot_argn("sweetgpupresent", &present_ok, sizeof(present_ok));
+ 	uint32_t on = 0;
+ 	PE_parse_boot_argn("sweetgpu", &on, sizeof(on));
++	a6_log("%s, %s%s\n", a6_soc->name, on ? "bring-up" : "off (boot-arg sweetgpu=1)",
++	    on && !present_ok ? ", frames stay on the CPU" : "");
+ 	if (!on) {
+ 		return;
+ 	}
+@@ -286,7 +322,7 @@ sweet_gpu_init(void)
+ 	}
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
+ 	a6_init_state(&gpu, ptoa_64(pn));
+-	uint32_t lvl = 4;	/* 499 MHz; boot-arg sweetgpufreq=1 (257) .. 5 (585) */
++	uint32_t lvl = 4;	/* A640 499 MHz, A630 520 MHz; boot-arg sweetgpufreq=1 (257) .. nlvl - 1 */
+ 	PE_parse_boot_argn("sweetgpufreq", &lvl, sizeof(lvl));
+ 	gpu.perf_level = lvl;
+ 	pool_kva = va;
+@@ -545,8 +581,9 @@ present_wait_locked(uint32_t k, const char *why)
+ 	}
+ 	return 0;
+ }
+-#define PANEL_W         1080
+-#define PANEL_H         2280
++/* the panel ABL scans out: the boot framebuffer (flame 1080x2280, Pixel 3 1080x2160) */
++#define PANEL_W         ((uint32_t)PE_state.video.v_width)
++#define PANEL_H         ((uint32_t)PE_state.video.v_height)
+ #define DISPLAY_MASK_OFF        0x500000ULL     /* 2x2 corner mattes, one per corner */
+ #define DISPLAY_MASK_SIDE       256u
+ #define DISPLAY_MASK_DIM        (DISPLAY_MASK_SIDE * 2)
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -666,7 +666,7 @@ sweet_ufs_init(void)
+ 	sweet_cpufreq_init();
+ 	sweet_pmem_init();       /* /dev/pmem: bsd/dev/sweet_pmem.c */
+ 	flame_wlan_init();       /* /dev/wlan, en0 + Apple80211 for wifid: bsd/dev/flame_wlan.c */
+-	sweet_gpu_init();        /* Adreno 640 (sweetgpu=1): bsd/dev/sweet_gpu.c */
++	sweet_gpu_init();        /* Adreno 630/640 (sweetgpu=1): bsd/dev/sweet_gpu.c */
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+--- a/iokit/Kernel/arm/SweetAccelerator.cpp
++++ b/iokit/Kernel/arm/SweetAccelerator.cpp
+@@ -47,6 +47,8 @@
+ extern "C" {
+ void proc_selfname(char *buf, int size);
+ bool sweet_gpu_ready(void);
++uint32_t sweet_gpu_id(void);
++uint32_t sweet_gpu_chip_id(void);
+ int sweet_gpu_map_user(uint64_t *iova_out, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ void sweet_gpu_unmap_user(uint64_t iova, uint64_t len);
+ int sweet_gpu_submit_user(uint64_t ib_iova, uint32_t dwords, uint32_t timeout_ms, uint32_t *fence_out);
+@@ -119,7 +121,9 @@ SweetAccelerator::start(IOService *provider)
+ 	setProperty("MetalPluginName", plugin);
+ 	setProperty("MetalPluginClassName", which == 2 ? "SweetMTL2Device" : "SweetMTLDevice");
+ 	setProperty("IOGLBundleName", plugin);
+-	setProperty("model", "Adreno 640");
++	char model[16];
++	snprintf(model, sizeof(model), "Adreno %u", sweet_gpu_id());
++	setProperty("model", model);
+ 	setProperty(kIOUserClientClassKey, "SweetAcceleratorUserClient");
+ 	registerService();
+ 	IOLog("SWEET MTL: IOAcceleratorES published (MetalPluginName %s)\n", plugin);
+@@ -413,8 +417,8 @@ SweetAcceleratorUserClient::externalMethod(uint32_t selector, IOExternalMethodAr
+ 		if (args->scalarOutputCount < 3) {
+ 			return kIOReturnBadArgument;
+ 		}
+-		out[0] = 640;
+-		out[1] = 0x06040001;
++		out[0] = sweet_gpu_id();
++		out[1] = sweet_gpu_chip_id();
+ 		out[2] = sweet_gpu_ready();
+ 		return kIOReturnSuccess;
+ 	case 1: {
+@@ -663,7 +667,7 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 	case NativeAdrenoMethodGetDeviceInfo: {
+ 		V2_OUT(NativeAdrenoAbiDeviceInfo);
+ 		/* what bsd/dev/sweet_a6xx.c's hw_init programs: GMEM 1 MB at 0x100000, UBWC 3 (hbb 15, lvl 2+3 swizzle) */
+-		rp->chip_id = 0x06040001;
++		rp->chip_id = sweet_gpu_chip_id();
+ 		rp->gmem_bytes = 0x100000;
+ 		rp->gmem_base = 0x100000;
+ 		rp->uche_trap_base = 0x1fffffffff000ULL;
+@@ -672,7 +676,7 @@ SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t i
+ 		rp->highest_bank_bit = 15;
+ 		rp->ubwc_swizzle = 0x6;
+ 		rp->macrotile_mode = 0;
+-		rp->ubwc_version = 3;
++		rp->ubwc_version = sweet_gpu_id() == 630 ? 2 : 3;	/* SDM845 UBWC 2.0, SM8150 3.0 */
+ 		rp->flags = NativeAdrenoDeviceClientIova;
+ 		return kIOReturnSuccess;
+ 	}
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -42,6 +42,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ /* bsd/dev/sweet_gpu.c: the Adreno 640's 2D engine scales each frame onto the panel (boot-arg sweetgpu=1). */
+ extern "C" {
+ bool sweet_gpu_ready(void);
++bool sweet_gpu_present_enabled(void);
+ int sweet_gpu_surface_slot(uint64_t key);
+ int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
+ int sweet_gpu_present(int slot, uintptr_t kva, uint32_t offset, uint32_t w, uint32_t h, uint32_t pitch,
+@@ -581,7 +582,7 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 	}
+ 
+-	if (sweet_gpu_ready() && presentGPU(rec)) {
++	if (sweet_gpu_ready() && sweet_gpu_present_enabled() && presentGPU(rec)) {
+ 		return;
+ 	}
+ 	if (sweet_display_fit_w) {
