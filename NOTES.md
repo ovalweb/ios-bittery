@@ -88,6 +88,17 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-10-24: Pixel 3 port PAUSED (read first) <<<
+
+The user stopped the Pixel 3 (blueline) work and asked for Android back.
+State, resume notes and restore steps: README "Pixel 3 (blueline): paused"
+and docs/PIXEL3.md "Status when paused". Last commits on `pixel3-blueline`:
+0100 (A630 core, CI runs 40056975546/40056977507, booted: GMU boots, HFI
+init fails), 0101 (GMU fixes tried from userland, never CI-built), Wi-Fi
+parked at "WMI READY, no scan". Android restore: `fastboot -w` then
+`fastboot reboot` (the agent's auto-mode classifier refused to run the
+userdata erase; the user runs it). Do not resume without the user asking.
+
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
 
 **STATE at end of 2026-10-18 (evening):**
