@@ -1,0 +1,7 @@
+#!/bin/sh
+# Root shell on the phone over USB Ethernet (dropbear from tools/install-ssh.sh).
+#   tools/phone-ssh ['command']        PHONE_HOST overrides 192.168.7.2
+cd "$(dirname "$0")/.." || exit 1
+exec ssh -i ../build/userland/ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	-o LogLevel=ERROR -o ConnectTimeout=10 root@"${PHONE_HOST:-192.168.7.2}" \
+	"export PATH=/var/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; ${1:-exec /bin/sh -l}"

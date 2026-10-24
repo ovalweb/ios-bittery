@@ -26,9 +26,17 @@ stub() {        # stub INSTALL_NAME DEST.tbd
 stub /usr/lib/libSystem.B.dylib "$out/lib/libSystem.tbd"
 stub /usr/lib/libobjc.A.dylib "$out/lib/libobjc.tbd"
 stub /usr/lib/libc++.1.dylib "$out/lib/libc++.tbd"
+stub /usr/lib/libz.1.dylib "$out/lib/libz.tbd"
+ln -sf libSystem.tbd "$out/lib/libm.tbd"		# libm is part of libSystem on iOS
 for fw in $frameworks; do
 	mkdir -p "$out/Frameworks/$fw.framework"
 	stub "/System/Library/Frameworks/$fw.framework/$fw" "$out/Frameworks/$fw.framework/$fw.tbd" ||
 		stub "/System/Library/PrivateFrameworks/$fw.framework/$fw" "$out/Frameworks/$fw.framework/$fw.tbd" || true
 done
 rmdir "$out/tmp" 2>/dev/null || true
+# headers: the macOS SDK's (the stub frameworks come first on -F and would hide them)
+sdk=$(xcrun --show-sdk-path)
+for fw in $frameworks; do
+	[ -d "$sdk/System/Library/Frameworks/$fw.framework/Headers" ] &&
+		ln -sfn "$sdk/System/Library/Frameworks/$fw.framework/Headers" "$out/Frameworks/$fw.framework/Headers"
+done

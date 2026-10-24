@@ -1,0 +1,9 @@
+#!/bin/bash
+# clang++ for iOS 16 arm64 without Xcode (see tools/ios-cc): libc++ from the
+# shared cache's stub, headers from the Command Line Tools' macOS SDK.
+iossdk=${IOSSDK:-$(cd "$(dirname "$0")/../.." && pwd)/build/iossdk}
+[ -f "$iossdk/lib/libc++.tbd" ] || { echo "ios-c++: no $iossdk/lib/libc++.tbd (run tools/ios-sdk.sh)" >&2; exit 1; }
+link=(-nostdlib -L "$iossdk/lib" -F "$iossdk/Frameworks" -lSystem -lc++)
+for a in "$@"; do case $a in -c|-E|-S|-M|-MM|-fsyntax-only) link=(); break ;; esac; done
+exec clang++ -target arm64-apple-ios16.0 -isysroot "$(xcrun --show-sdk-path)" -Wno-incompatible-sysroot \
+	"${link[@]}" "$@"
