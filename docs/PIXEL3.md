@@ -253,12 +253,48 @@ Ordered by how likely they are to stop the boot.
    -> context bank 2, no SMR for `0x16`; writing one (S2CR, then SMR 6)
    reset the phone: the hypervisor keeps the stream table. So 0088
    bit-bangs the bus on the SE's pins instead.
-6. **USB** (`sweetusb=1/2`): same controller addresses as sweet; untested.
-7. **Battery**: keep the default static 100 %; `sweetbattery=1` reads
-   PM6150 fuel-gauge registers and is wrong on PM8998/PMI8998.
+6. **USB** (`sweetusb=1/2`): works (0097-0099): the QUSB2 PHY has to be
+   brought up (ABL leaves it powered down) and the DWC3 needs SMMU stream
+   `0x740`. 0099 handles a Mac-initiated bus reset.
+7. **Battery**: real readings since 0099 (PMI8998 at SPMI SID 2: fuel gauge
+   0x40/0x41, charger 0x10, USBIN 0x13).
 8. **iOS 16.6.1 vs 16.7.** If a daemon that talks to one of the kernel's
    stand-in drivers crashes on an unknown selector (`SWEET ... selector`
    lines in the log), compare that framework between the two versions.
+
+## Status when paused (2026-10-24)
+
+The port stopped here; the phone went back to Android. Notes for whoever
+picks it up (commits are on `pixel3-blueline`):
+
+- **Boot images**: `tools/mkboot-blueline.sh ios sweetusb=2
+  sweetusbdma=0xf0000000 ufslogsecs=1` with the 0100 kernel from CI. With
+  `../research/fw/gpu` present it also packs the A630 firmware into the ADT.
+  `sweetgpu=1` starts the kernel's GPU bring-up; `sweetmtl=2` selects the
+  SweetMetal2 bundle (install with `tools/install-metal2.sh`).
+- **SSH**: `tools/install-ssh.sh` once, reboot, then `tools/phone-ssh`.
+  dropbear must run without `-E` (built without syslog). Never rewrite a
+  running binary in place: delete it first (cached code signature).
+- **GPU (A630)**: patch 0100 (CI-built) and 0101 (`sweet_a6xx.c` work in
+  progress, never built by CI or booted as a kernel; the userland `phone/gpu`
+  tool builds from the patched tree: `SOC=sdm845 phone/gpu/build.sh`, run `GPU_POOL_PA=0xe2000000
+  GPU_SLOW=300 gpu up` over SSH with the kernel GPU off). Reached: CX power,
+  GMU firmware boot (`0xbabeface`), RSC stop/start with ack (mainline order;
+  flame's A640 never acks), boot-slumber OOB acked, SPTPRAC on. Fails at
+  `HFI_CTRL_INIT`: CM3 fault (`GMU2HOST_INTR_INFO` bit 23) or an instant SoC
+  reset, the first time the GMU reads host memory. Last untested fix: turn on
+  `gcc_gpu_memnoc_gfx`/`gcc_gpu_snoc_dvm_gfx` after the CX GDSC (they read
+  halted when enabled before it). Other changes tried: GMU at 200 MHz,
+  HFI table size for two queues, MC0/SH0 bus votes. cmd-db on this phone:
+  `gfx.lvl` 0x30050, `xo.lvl` 0x30080 (the PDC's third vote).
+- **Wi-Fi**: `tools/install-wifi.sh FWDIR` (modem/wlan firmware and this
+  phone's own modemst1/2, fsg, fsc images), then `wland up 0` on the phone
+  after a fresh boot. WMI READY, ECHO and vdev creation work; the HL.2.2
+  firmware never starts a scan (INIT with the hardware mode is the last,
+  untested variant; see `phone/wifi/radio.c`). `wland shutdown` must not be
+  used: the PAS shutdown SMC never returns for this modem.
+- **Known issue**: after a failed GPU bring-up the phone resets a few
+  seconds later and lands in fastboot.
 
 ## Back to Android
 

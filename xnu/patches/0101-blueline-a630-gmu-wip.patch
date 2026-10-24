@@ -1,0 +1,142 @@
+--- a/bsd/dev/sweet_a6xx.c
++++ b/bsd/dev/sweet_a6xx.c
+@@ -168,6 +168,7 @@ static void zero_pa(uint64_t pa, uint64_t size)
+ #define VA_LOG		A6_GMU_LOG_VA
+ #define VA_HFI		0x60005000u
+ #define VA_DEBUG	0x60009000u
++static int gmu_cb = -1;			/* the GMU's SMMU bank, for gmu_diag */
+ 
+ #define RSCC		(A6_GPU_BASE + 0x6a000 + 0x23000)	/* GMU + 0x23000 */
+ #define RSCC_REG(o)	(RSCC + 4ull * (o))
+@@ -273,8 +274,10 @@ static int power_cx(void)
+ 	       rd32(GPUCC + GPUCC_CX_GMU));
+ 	branch_on("gcc gpu_cfg_ahb", GCC + 0x71004);
+ 	branch_on("gcc ddrss_gpu_axi", GCC + a6_soc->gcc_axi);
+-	branch_on("gcc gpu_memnoc_gfx", GCC + 0x7100c);
+-	branch_on("gcc gpu_snoc_dvm_gfx", GCC + 0x71018);
++	if (!a6_soc->legacy) {
++		branch_on("gcc gpu_memnoc_gfx", GCC + 0x7100c);
++		branch_on("gcc gpu_snoc_dvm_gfx", GCC + 0x71018);
++	}
+ 
+ 	uint64_t gdsc = GPUCC + GPUCC_CX_GDSCR;
+ 	wr32(gdsc, rd32(gdsc) & ~1u);
+@@ -282,9 +285,23 @@ static int power_cx(void)
+ 	a6_log("cx gdsc -> %x %s\n", rd32(gdsc), rc ? "TIMEOUT" : "on");
+ 	if (rc)
+ 		return -1;
++	if (a6_soc->legacy) {
++		/* mainline order: the GPU's memory NoC branches once CX is up (they read halted before it) */
++		branch_on("gcc gpu_memnoc_gfx", GCC + 0x7100c);
++		branch_on("gcc gpu_snoc_dvm_gfx", GCC + 0x71018);
++	}
+ 
+ 	uint64_t rcg = GPUCC + GPUCC_GMU_RCG;
+-	wr32(rcg + 4, (rd32(rcg + 4) & ~0x71fu) | 1u);
++	if (a6_soc->legacy) {
++		/*
++		 * The A630's GMU at 200 MHz like mainline (gpucc-sdm845.c: GPLL0_OUT_MAIN_DIV / 1.5, parent 6;
++		 * GCC branch vote 0x52004 bits 15/16 = gcc_gpu_gpll0(_div)_clk_src). The A640 runs it from XO.
++		 */
++		wr32(GCC + 0x52004, rd32(GCC + 0x52004) | (1u << 15) | (1u << 16));
++		wr32(rcg + 4, (rd32(rcg + 4) & ~0x71fu) | (6u << 8) | 2u);
++	} else {
++		wr32(rcg + 4, (rd32(rcg + 4) & ~0x71fu) | 1u);
++	}
+ 	wr32(rcg, rd32(rcg) | 1u);
+ 	rc = wait_bit(rcg, 1, 0, 10);
+ 	a6_log("gmu rcg %x cfg %x %s\n", rd32(rcg), rd32(rcg + 4), rc ? "UPDATE TIMEOUT" : "");
+@@ -409,6 +426,7 @@ static int gmu_smmu(struct a6_gpu *g)
+ 	map_gmu_pages(GMEM_L3_6(g), VA_HFI, GMEM_HFI(g), 0x4000, 0);
+ 	map_gmu_pages(GMEM_L3_6(g), VA_DEBUG, GMEM_DEBUG(g), 0x4000, 0);
+ 	smmu_bank(g->gmu_smr, g->gmu_cb, GMEM_L1(g), GMU_SID, GMU_SID_MASK);
++	gmu_cb = g->gmu_cb;
+ 	return 0;
+ }
+ 
+@@ -442,11 +460,11 @@ static void rpmh_init(void)
+ static void hfi_table(struct a6_gpu *g)
+ {
+ 	uint64_t t = GMEM_HFI(g);
++	uint32_t nq = a6_soc->legacy ? 2 : 3;	/* a6xx_hfi_init: command, response (id 4 on legacy), debug */
+ 	wr32(t + 0, 0);
+-	wr32(t + 4, 6 * 4 + 3 * 12 * 4);
++	wr32(t + 4, 6 * 4 + nq * 12 * 4);	/* bytes: the table header and the queue headers */
+ 	wr32(t + 8, 6);
+ 	wr32(t + 12, 12);
+-	uint32_t nq = a6_soc->legacy ? 2 : 3;	/* a6xx_hfi_init: command, response (id 4 on legacy), debug */
+ 	wr32(t + 16, nq);
+ 	wr32(t + 20, nq);
+ 	for (uint32_t q = 0; q < nq; q++) {
+@@ -516,6 +534,20 @@ static int gmu_votes(void)
+ 	return 0;
+ }
+ 
++/* What the GMU says when something did not answer: interrupts, CM3 state, its SMMU bank. */
++#define GMU_FW_BUSY	0x1f81a		/* GMU_CM3_FW_BUSY */
++#define GMU_AO_STATUS	0x23b05		/* GMU_AO_HOST_INTERRUPT_STATUS */
++static void gmu_diag(const char *what)
++{
++	uint32_t fsr = gmu_cb >= 0 ? rd32(SMMU_CB(gmu_cb) + CB_FSR) : 0;
++	uint64_t far = gmu_cb >= 0 ? (rd32(SMMU_CB(gmu_cb) + CB_FAR) | ((uint64_t)rd32(SMMU_CB(gmu_cb) + CB_FAR + 4) << 32)) : 0;
++	a6_log("gmu diag (%s): g2h %x ao %x fw_busy %x init %x rpmh %x hfi %x sfr %x; smmu cb%d fsr %x far %llx fsynr0 %x\n",
++	       what, rd32(GMU_REG(GMU_G2H_INFO)), rd32(GMU_REG(GMU_AO_STATUS)), rd32(GMU_REG(GMU_FW_BUSY)),
++	       rd32(GMU_REG(GMU_INIT_RESULT)), rd32(GMU_REG(GMU_RPMH_STATE)), rd32(GMU_REG(GMU_HFI_CTRL)),
++	       rd32(GMU_REG(GMU_SFR_ADDR)), gmu_cb, fsr, (unsigned long long)far,
++	       gmu_cb >= 0 ? rd32(SMMU_CB(gmu_cb) + CB_FSYNR0) : 0);
++}
++
+ /* Set an OOB request and wait for its ack (a6xx_gmu_set_oob); the ack is cleared either way. */
+ static int gmu_oob(unsigned set, unsigned ack, const char *what)
+ {
+@@ -538,14 +570,18 @@ static int gmu_legacy_start(void)
+ 	wr32(GMU_REG(GMU_MX_VOTE_IDX), (vote >> 8) & 0xff);
+ 	if (gmu_oob(OOB_SLUMBER_SET, OOB_SLUMBER_ACK, "boot_slumber"))
+ 		return -1;
++	gmu_diag("after boot_slumber");
+ 	wr32(GMU_REG(GMU_SPTPRAC_CTRL), 0x778000);
+ 	int rc = wait_bit(GMU_REG(GMU_SPTPRAC_STATUS), 0x38, 1, 10);	/* (status & 0x38) == 0x28 */
+ 	a6_log("gmu: sptprac %x%s\n", rd32(GMU_REG(GMU_SPTPRAC_STATUS)),
+ 	       (rd32(GMU_REG(GMU_SPTPRAC_STATUS)) & 0x38) == 0x28 ? " on" : " NOT on");
+ 	(void)rc;
++	gmu_diag("after sptprac");
+ 	wr32(GMU_REG(GMU_HFI_CTRL_INIT), 1);
+ 	rc = wait_bit(GMU_REG(GMU_HFI_CTRL), 1, 1, 100);
+ 	a6_log("gmu: hfi queues %s (status %x)\n", rc ? "NOT started" : "started", rd32(GMU_REG(GMU_HFI_CTRL)));
++	if (rc)
++		gmu_diag("hfi start");
+ 	return rc;
+ }
+ 
+@@ -556,11 +592,20 @@ static int gmu_boot(struct a6_gpu *g)
+ 	rpmh_init();
+ 	hfi_table(g);
+ 
++	if (a6_soc->legacy) {
++		/* a6xx_rpmh_stop at the end of a6xx_gmu_rpmh_init: the RSC down, before the start below */
++		wr32(GMU_REG(GMU_RSCC_REQ), 1);
++		int st = wait_bit(RSCC_REG(0x0004), 1u << 16, 1, 10);	/* GPU_RSCC_RSC_STATUS0_DRV0 */
++		wr32(GMU_REG(GMU_RSCC_REQ), 0);
++		a6_log("rsc stop %s (status0 %x)\n", st ? "TIMEOUT" : "ok", rd32(RSCC_REG(0x0004)));
++	}
+ 	wr32(GMU_REG(GMU_GENERAL_7), 1);
+ 	wr32(GMU_REG(GMU_RSCC_REQ), 1u << 1);
+-	(void)wait_bit(GMU_REG(GMU_RSCC_ACK), 1u << 1, 1, 200);	/* never acks; harmless */
+-	(void)wait_bit(RSCC_REG(0x0101), 0xffffffff, 0, 10);
++	int rack = wait_bit(GMU_REG(GMU_RSCC_ACK), 1u << 1, 1, 200);	/* the A640 never acks; harmless there */
++	int rbusy = wait_bit(RSCC_REG(0x0101), 0xffffffff, 0, 10);
+ 	wr32(GMU_REG(GMU_RSCC_REQ), 0);
++	a6_log("rsc start: ack %s, seq %s (ack %x busy %x)\n", rack ? "none" : "ok", rbusy ? "BUSY" : "idle",
++	       rd32(GMU_REG(GMU_RSCC_ACK)), rd32(RSCC_REG(0x0101)));
+ 
+ 	int nblk = fw_load(g);
+ 	a6_log("gmu: %d firmware blocks loaded\n", nblk);
+@@ -604,6 +649,8 @@ static int gmu_boot(struct a6_gpu *g)
+ 	a6_log("gmu: init result %x %s, hfi_ctrl %x\n", r, ok ? "BOOTED" : "timeout", rd32(GMU_REG(GMU_HFI_CTRL)));
+ 	if (!ok)
+ 		return -1;
++	if (a6_soc->legacy)
++		gmu_diag("after boot");
+ 	return a6_soc->legacy ? gmu_legacy_start() : 0;
+ }
+ 

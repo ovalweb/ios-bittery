@@ -39,6 +39,12 @@ static void vglog(const char *fmt, va_list ap)
 		write(console_fd, "GPU: ", 5);
 		write(console_fd, buf, (size_t)n);
 	}
+	/* GPU_SLOW=MS: let the live log (100 ms UDP batches) ship each line before the next step */
+	static int slow = -1;
+	if (slow < 0)
+		slow = getenv("GPU_SLOW") ? atoi(getenv("GPU_SLOW")) : 0;
+	if (slow > 0)
+		usleep((useconds_t)slow * 1000);
 }
 
 void glog(const char *fmt, ...)
@@ -127,6 +133,16 @@ void gpu_save(void)
 	rename(GPU_STATE_PATH ".tmp", GPU_STATE_PATH);
 }
 
+/*
+ * GPU_POOL_PA: the 16 MB pool at a fixed physical address in RAM XNU does not manage (Pixel 3: the
+ * low bank 0xa2000000-0xf2000000, e.g. 0xe2000000), when /dev/pmem finds no 16 MB contiguous run.
+ */
+static uint64_t fixed_pool(void)
+{
+	const char *e = getenv("GPU_POOL_PA");
+	return e ? strtoull(e, NULL, 0) & ~(A6_POOL_ALIGN - 1) : 0;
+}
+
 /* 0: state loaded, pool alive and the CP running our SQE. */
 int gpu_attach(void)
 {
@@ -139,8 +155,8 @@ int gpu_attach(void)
 	if (n != (ssize_t)sizeof(st) || st.magic != STATE_MAGIC || st.version != STATE_VERSION)
 		return -1;
 	struct pmem_list l;
-	int alive = 0;
-	if (pm_list(&l) == 0)
+	int alive = fixed_pool() && st.hw.pool_pa == fixed_pool();	/* stale ones fail the GX check */
+	if (!alive && pm_list(&l) == 0)
 		for (uint32_t i = 0; i < l.count; i++)
 			if (l.ent[i].pa == st.hw.pool_pa && l.ent[i].size >= A6_POOL_SIZE)
 				alive = 1;
@@ -538,11 +554,20 @@ int gpu_up(int paint)
 	memset(&st, 0, sizeof(st));
 	st.magic = STATE_MAGIC;
 	st.version = STATE_VERSION;
-	uint64_t pool = pm_alloc(A6_POOL_SIZE, A6_POOL_ALIGN);
+	uint64_t pool = fixed_pool() ? fixed_pool() : pm_alloc(A6_POOL_SIZE, A6_POOL_ALIGN);
 	if (!pool)
 		return -1;
 	a6_init_state(&st.hw, pool);
 	st.heap_next = A6_OFF_FREE;
+	/*
+	 * DDR (BCM MC0) and the memory NoC (SH0) at their top levels before the GMU first touches
+	 * memory, as the kernel's gpu_bus_vote does (mainline votes the GPU's interconnect path).
+	 */
+	static const char *const bcm[] = { "MC0", "SH0" };
+	for (unsigned i = 0; i < 2; i++) {
+		uint32_t off = 0, val = 1u << 30 | 1u << 29 | 0x3fffu << 14 | 0x3fffu;
+		glog("bus vote %s top -> %d\n", bcm[i], pm_rpmh(bcm[i], 1, &off, &val));
+	}
 	glog("gpu: pool %llx (%llu MB)\n", (unsigned long long)pool, A6_POOL_SIZE >> 20);
 	gpu_save();
 	int rc = a6_power_up(&st.hw);

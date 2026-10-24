@@ -106,3 +106,16 @@ int wait_bit(uint64_t pa, uint32_t mask, int set, unsigned ms)
 	}
 	return -1;
 }
+
+int pm_rpmh(const char *res, unsigned n, const uint32_t *off, const uint32_t *val)
+{
+	struct pmem_rpmh r;
+	memset(&r, 0, sizeof(r));
+	snprintf(r.res, sizeof(r.res), "%s", res);
+	r.n = n;
+	for (unsigned i = 0; i < n && i < 4; i++) {
+		r.offset[i] = off[i];
+		r.value[i] = val[i];
+	}
+	return ioctl(pm_fd, PMEM_RPMH, &r) < 0 ? errno : 0;
+}

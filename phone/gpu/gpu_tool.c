@@ -72,6 +72,43 @@ static void hang_dump(void)
 	gpu_clear_fault();
 }
 
+/* cmd-db (Linux cmd-db.c layout): each resource's RPMh address and its ARC levels */
+static void cmddb(int n, char **ids)
+{
+	uint64_t db = a6_rd(0x0c3f000cull);
+	if (a6_rd(db + 4) != 0x0c0330db) {
+		printf("cmd-db: bad magic at %llx\n", (unsigned long long)db);
+		return;
+	}
+	uint64_t data = db + 4 + 4 + 8 * 16 + 4 + 4;
+	for (int k = 0; k < n; k++) {
+		int found = 0;
+		for (uint32_t r = 0; r < 8 && !found; r++) {
+			uint64_t rh = db + 8 + 16 * r;
+			uint32_t w0 = a6_rd(rh), w1 = a6_rd(rh + 4);
+			uint32_t hoff = w0 >> 16, doff = w1 & 0xffff, cnt = w1 >> 16;
+			for (uint32_t e = 0; e < cnt && !found; e++) {
+				uint64_t ent = data + hoff + 24 * e;
+				char name[9];
+				for (uint32_t i = 0; i < 8; i++)
+					name[i] = (char)(a6_rd(ent + (i & ~3u)) >> (8 * (i & 3)));
+				name[8] = 0;
+				if (strcmp(ids[k], "all") ? strncmp(name, ids[k], 8) != 0 : (a6_rd(ent + 16) >> 16) != 3)
+					continue;	/* "all": every ARC resource (slave 3) */
+				found = strcmp(ids[k], "all") != 0;
+				uint32_t addr = a6_rd(ent + 16), w5 = a6_rd(ent + 20), len = w5 & 0xffff;
+				uint64_t aux = data + doff + (w5 >> 16);
+				printf("%-8s addr %#x, %u aux bytes:", name, addr, len);
+				for (uint32_t i = 0; i < len / 2 && i < 16; i++)
+					printf(" %u", (a6_rd(aux + 2 * (i & ~1u)) >> (16 * (i & 1))) & 0xffff);
+				printf("\n");
+			}
+		}
+		if (!found)
+			printf("%s: not in cmd-db\n", ids[k]);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -84,6 +121,11 @@ int main(int argc, char **argv)
 	a6_soc_select(630);		/* the Pixel 3's Adreno 630 (sweet_a6xx.h) */
 #endif
 	const char *c = argv[1];
+	if (!strcmp(c, "cmddb")) {
+		pm_init();
+		cmddb(argc - 2, argv + 2);
+		return 0;
+	}
 	pm_init();
 	if (!strcmp(c, "up"))
 		return gpu_up(argc > 2 && !strcmp(argv[2], "-p")) ? 1 : 0;

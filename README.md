@@ -8,10 +8,47 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
-> **Pixel 3 (`blueline`, SDM845):** a source port is in this tree
-> (`tools/mkadt.py --board blueline`, `BOARD=blueline shim/build.sh`,
-> kernel patches 0082-0085, same kernel binary). It has not been booted on
-> hardware yet; see [docs/PIXEL3.md](docs/PIXEL3.md).
+## Pixel 3 (`blueline`, SDM845): paused
+
+The Pixel 3 port in this tree (`tools/mkadt.py --board blueline`,
+`tools/mkboot-blueline.sh`, kernel patches 0082-0100, the same kernel binary)
+is **paused as of 2026-10-24** and the test phone is back on Android. The work
+is kept as it was; nothing below is maintained right now.
+
+What ran on hardware (kernel 0099/0100, iPhone X iOS 16.6.1 userland):
+
+| Area | State |
+| --- | --- |
+| Boot | Google ABL (unlocked) → `fastboot boot` of the shim → XNU; resets land back in fastboot |
+| CPU | 4 cores (cpus=4), cpufreq-hw, thermal readout |
+| GUI | Lock screen, home screen, Settings (About works), Control Center; software rendering |
+| Touch, buttons | ST FTS touch over bit-banged I²C (gpio27/28; the SE's FIFO and GPI DMA are unusable on this phone), power and volume keys |
+| Battery | Real PMI8998 fuel gauge readings (percentage, voltage, charging) |
+| USB | QUSB2 PHY up, CDC-ECM Ethernet to a Mac: live kernel log, kernel file server, **SSH** (dropbear, dash, toybox) |
+| Modem / Wi-Fi | From iOS userland (`phone/wifi`, wland): the self-authenticating modem boots (MBA), rmtfs/TFTP/pd-mapper run, the WCN3990 firmware reaches WMI READY. **Not done:** the firmware never starts a scan |
+| GPU | Adreno 630 support in the A6xx core (patch 0100): clocks, CX power, GMU firmware boots, RSC handshake. **Not done:** the GMU faults (or the SoC resets) at HFI init, so no Metal yet. Turnip, metal2vulkan and SweetMetal2 build without Xcode (`tools/build-turnip-ios.sh`, `tools/build-m2v-bridge.sh`) |
+
+Where the last session stopped, and the next things to try, are in
+[docs/PIXEL3.md](docs/PIXEL3.md) ("Status when paused"). Much of the Pixel 3
+work came from [ios-flame](https://github.com/NWylynko/ios-flame) (Pixel 4);
+see [CREDITS.md](CREDITS.md).
+
+### Getting Android back
+
+The port writes only `userdata` (the iOS root and the kernel's log ring live
+there). Boot, system, vendor, bootloaders, modem, `persist` and the EFS
+partitions are never written. With the phone in fastboot (Power + Volume down):
+
+```sh
+fastboot -w          # erase userdata (the iOS root); Android formats it again
+fastboot reboot      # Android starts as after a factory reset
+```
+
+Then set the phone up, enable USB debugging and copy your files back
+(`adb push backup/blueline-*-android/sdcard/. /sdcard/`). If Android itself is
+damaged, flash Google's factory image for blueline or single images from the
+`tools/pixel3-backup.sh` backup (details in [docs/PIXEL3.md](docs/PIXEL3.md),
+"Back to Android").
 
 ## What works
 

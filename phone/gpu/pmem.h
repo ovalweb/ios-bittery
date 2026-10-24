@@ -31,6 +31,15 @@ struct pmem_list {
 #define PMEM_SMC	_IOWR('P', 3, struct pmem_smc)
 #define PMEM_LIST	_IOR('P', 4, struct pmem_list)
 
+struct pmem_rpmh {
+	char res[16];
+	uint32_t n;
+	uint32_t offset[4];
+	uint32_t value[4];
+};
+#define PMEM_RPMH	_IOW('P', 5, struct pmem_rpmh)
+
+int pm_rpmh(const char *res, unsigned n, const uint32_t *off, const uint32_t *val);	/* errno or 0 */
 void pm_init(void);			/* exits if /dev/pmem is missing */
 uint32_t rd32(uint64_t pa);
 void wr32(uint64_t pa, uint32_t v);
